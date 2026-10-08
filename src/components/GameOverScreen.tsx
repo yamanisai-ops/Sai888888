@@ -44,6 +44,11 @@ interface GameOverScreenProps {
   playerXp?: number;
   playerXpNext?: number;
   hasLeveledUp?: boolean;
+  beatGhost?: boolean;
+  isCrushed?: boolean;
+  ghostTargetScore?: number;
+  ghostCoinBonus?: number;
+  ghostXpBonus?: number;
   onShowLevelUp?: () => void;
   onPlayAgain: () => void;
   onHome: () => void;
@@ -72,6 +77,11 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
   playerXp = 0,
   playerXpNext = 100,
   hasLeveledUp = false,
+  beatGhost = false,
+  isCrushed = false,
+  ghostTargetScore,
+  ghostCoinBonus = 25,
+  ghostXpBonus = 50,
   onShowLevelUp,
   onPlayAgain,
   onHome,
@@ -116,13 +126,13 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
 
     animId = requestAnimationFrame(animateCount);
 
-    if (isNewRecord && score > 0) {
+    if ((isNewRecord || (mode === 'GHOST' && beatGhost)) && score > 0) {
       try {
         confetti({
-          particleCount: 50,
-          spread: 60,
+          particleCount: 55,
+          spread: 65,
           origin: { y: 0.55 },
-          colors: ['#38bdf8', '#f59e0b', '#ec4899', '#10b981'],
+          colors: ['#a855f7', '#38bdf8', '#f59e0b', '#ec4899', '#10b981'],
         });
       } catch {
         // Fallback if confetti fails
@@ -130,7 +140,7 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
     }
 
     return () => cancelAnimationFrame(animId);
-  }, [isNewRecord, score, coinsEarned, xpEarned]);
+  }, [isNewRecord, score, coinsEarned, xpEarned, mode, beatGhost]);
 
   const handleShare = async () => {
     soundEngine.playClick();
@@ -292,6 +302,55 @@ Can you beat me?`;
           </div>
         </div>
 
+        {/* Ghost Mode Results Card (Requirement 4: BEAT THE GHOST) */}
+        {mode === 'GHOST' && (
+          <div
+            className={`w-full p-2.5 sm:p-3 rounded-2xl border text-center shadow-lg transition-all animate-in zoom-in-95 duration-200 ${
+              beatGhost
+                ? 'bg-purple-950/85 border-purple-400 shadow-[0_0_20px_rgba(168,85,247,0.35)]'
+                : 'bg-slate-900/90 border-purple-900/50'
+            }`}
+          >
+            {beatGhost ? (
+              <>
+                <div className="flex items-center justify-center gap-1.5">
+                  <span className="text-xl">👻</span>
+                  <span className="font-display font-black text-sm sm:text-base text-purple-200 tracking-wide uppercase">
+                    👻 GHOST DEFEATED!
+                  </span>
+                  <span className="text-xl">👻</span>
+                </div>
+                {isCrushed && (
+                  <div className="font-display font-black text-[11px] text-amber-300 tracking-wider uppercase mt-0.5 animate-pulse">
+                    ⚡ CRUSHED IT! ⚡
+                  </div>
+                )}
+                <div className="flex items-center justify-center gap-3 mt-1 text-xs font-mono-numbers font-bold">
+                  <span className="text-amber-300">+{ghostCoinBonus ?? 25} 🪙 Coins</span>
+                  <span className="text-cyan-300">+{ghostXpBonus ?? 50} XP</span>
+                </div>
+                {ghostTargetScore !== undefined && (
+                  <div className="text-[10px] text-purple-300/80 mt-1 font-mono-numbers">
+                    Final Score: {score} · Ghost: {ghostTargetScore} (+{Math.max(0, score - ghostTargetScore)} pts lead)
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                <div className="flex items-center justify-center gap-1.5 text-purple-300 text-xs font-bold font-display">
+                  <span>👻</span>
+                  <span>GHOST TARGET: {ghostTargetScore ?? '—'} PTS</span>
+                </div>
+                <div className="text-[11px] text-slate-300 mt-0.5">
+                  {(ghostTargetScore ?? 0) > score
+                    ? `Ghost was ahead by ${(ghostTargetScore ?? 0) - score} points. Try again!`
+                    : `Tied with Ghost! Score 1 more point to defeat it!`}
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
         {/* SESSION SUMMARY (8 Metrics in clean 4x2 Grid for Mobile Viewports) */}
         <div className="w-full p-2 sm:p-2.5 rounded-2xl bg-slate-900/90 border border-slate-800 shadow-md">
           <div className="text-[8.5px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 flex items-center justify-between px-0.5">
@@ -303,53 +362,67 @@ Can you beat me?`;
             )}
           </div>
 
-          <div className="grid grid-cols-4 gap-1 sm:gap-1.5 text-center">
+          <div className="grid grid-cols-5 gap-1 sm:gap-1.5 text-center">
             {/* 1. FINAL SCORE */}
             <div className="p-1 sm:p-1.5 rounded-lg bg-slate-950/80 border border-slate-800/80 flex flex-col items-center">
-              <span className="text-[7px] sm:text-[7.5px] uppercase font-bold text-slate-400 tracking-tight leading-tight">FINAL</span>
+              <span className="text-[7px] sm:text-[7.5px] uppercase font-bold text-slate-400 tracking-tight leading-tight truncate w-full">FINAL</span>
               <span className="font-display text-xs sm:text-sm font-black text-cyan-300 font-mono-numbers mt-0.5">{score}</span>
             </div>
 
             {/* 2. BEST SCORE */}
             <div className="p-1 sm:p-1.5 rounded-lg bg-slate-950/80 border border-slate-800/80 flex flex-col items-center">
-              <span className="text-[7px] sm:text-[7.5px] uppercase font-bold text-amber-400 tracking-tight leading-tight">BEST</span>
+              <span className="text-[7px] sm:text-[7.5px] uppercase font-bold text-amber-400 tracking-tight leading-tight truncate w-full">BEST</span>
               <span className="font-display text-xs sm:text-sm font-black text-white font-mono-numbers mt-0.5">{bestScore}</span>
             </div>
 
             {/* 3. MAX COMBO */}
             <div className="p-1 sm:p-1.5 rounded-lg bg-slate-950/80 border border-slate-800/80 flex flex-col items-center">
-              <span className="text-[7px] sm:text-[7.5px] uppercase font-bold text-rose-400 tracking-tight leading-tight">COMBO</span>
+              <span className="text-[7px] sm:text-[7.5px] uppercase font-bold text-rose-400 tracking-tight leading-tight truncate w-full">COMBO</span>
               <span className="font-display text-xs sm:text-sm font-black text-white font-mono-numbers mt-0.5">{maxCombo}x</span>
             </div>
 
-            {/* 4. PERFECT REACTIONS */}
+            {/* 4. BEST REACTION */}
             <div className="p-1 sm:p-1.5 rounded-lg bg-slate-950/80 border border-slate-800/80 flex flex-col items-center">
-              <span className="text-[7px] sm:text-[7.5px] uppercase font-bold text-yellow-400 tracking-tight leading-tight">PERFECT</span>
+              <span className="text-[7px] sm:text-[7.5px] uppercase font-bold text-emerald-400 tracking-tight leading-tight truncate w-full">REACTION</span>
+              <span className="font-display text-xs sm:text-sm font-black text-emerald-300 font-mono-numbers mt-0.5">
+                {bestReactionTimeMs > 0 ? `${bestReactionTimeMs}ms` : fastestReactionMs > 0 ? `${fastestReactionMs}ms` : '—'}
+              </span>
+            </div>
+
+            {/* 5. PERFECT REACTIONS */}
+            <div className="p-1 sm:p-1.5 rounded-lg bg-slate-950/80 border border-slate-800/80 flex flex-col items-center">
+              <span className="text-[7px] sm:text-[7.5px] uppercase font-bold text-yellow-400 tracking-tight leading-tight truncate w-full">PERFECT</span>
               <span className="font-display text-xs sm:text-sm font-black text-amber-400 font-mono-numbers mt-0.5">{perfectCount}</span>
             </div>
 
-            {/* 5. NEAR MISSES */}
+            {/* 6. NEAR MISSES */}
             <div className="p-1 sm:p-1.5 rounded-lg bg-slate-950/80 border border-slate-800/80 flex flex-col items-center">
-              <span className="text-[7px] sm:text-[7.5px] uppercase font-bold text-orange-400 tracking-tight leading-tight">NEAR MISS</span>
+              <span className="text-[7px] sm:text-[7.5px] uppercase font-bold text-orange-400 tracking-tight leading-tight truncate w-full">NEAR MISS</span>
               <span className="font-display text-xs sm:text-sm font-black text-orange-400 font-mono-numbers mt-0.5">{nearMisses}</span>
             </div>
 
-            {/* 6. POWER-UPS USED */}
+            {/* 7. POWER-UPS USED */}
             <div className="p-1 sm:p-1.5 rounded-lg bg-slate-950/80 border border-slate-800/80 flex flex-col items-center">
-              <span className="text-[7px] sm:text-[7.5px] uppercase font-bold text-emerald-400 tracking-tight leading-tight">POWER-UPS</span>
+              <span className="text-[7px] sm:text-[7.5px] uppercase font-bold text-emerald-400 tracking-tight leading-tight truncate w-full">POWER-UPS</span>
               <span className="font-display text-xs sm:text-sm font-black text-emerald-400 font-mono-numbers mt-0.5">{powerUpsCollected}</span>
-            </div>
-
-            {/* 7. COINS EARNED */}
-            <div className="p-1 sm:p-1.5 rounded-lg bg-slate-950/80 border border-slate-800/80 flex flex-col items-center">
-              <span className="text-[7px] sm:text-[7.5px] uppercase font-bold text-amber-300 tracking-tight leading-tight">COINS</span>
-              <span className="font-display text-xs sm:text-sm font-black text-amber-300 font-mono-numbers mt-0.5">+{coinsEarned}</span>
             </div>
 
             {/* 8. SURVIVAL TIME */}
             <div className="p-1 sm:p-1.5 rounded-lg bg-slate-950/80 border border-slate-800/80 flex flex-col items-center">
-              <span className="text-[7px] sm:text-[7.5px] uppercase font-bold text-purple-300 tracking-tight leading-tight">SURVIVAL</span>
+              <span className="text-[7px] sm:text-[7.5px] uppercase font-bold text-purple-300 tracking-tight leading-tight truncate w-full">SURVIVAL</span>
               <span className="font-display text-xs sm:text-sm font-black text-purple-300 font-mono-numbers mt-0.5">{formatSurvivalTime(survivalTimeSec)}</span>
+            </div>
+
+            {/* 9. COINS EARNED */}
+            <div className="p-1 sm:p-1.5 rounded-lg bg-slate-950/80 border border-slate-800/80 flex flex-col items-center">
+              <span className="text-[7px] sm:text-[7.5px] uppercase font-bold text-amber-300 tracking-tight leading-tight truncate w-full">COINS</span>
+              <span className="font-display text-xs sm:text-sm font-black text-amber-300 font-mono-numbers mt-0.5">+{coinsEarned}</span>
+            </div>
+
+            {/* 10. XP EARNED */}
+            <div className="p-1 sm:p-1.5 rounded-lg bg-slate-950/80 border border-slate-800/80 flex flex-col items-center">
+              <span className="text-[7px] sm:text-[7.5px] uppercase font-bold text-cyan-300 tracking-tight leading-tight truncate w-full">XP</span>
+              <span className="font-display text-xs sm:text-sm font-black text-cyan-300 font-mono-numbers mt-0.5">+{xpEarned}</span>
             </div>
           </div>
         </div>

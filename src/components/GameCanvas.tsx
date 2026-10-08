@@ -4,12 +4,19 @@ import {
   ActiveEvent,
   ActivePowerUpState,
   FloatingFeedback,
+  GameMode,
   Obstacle,
   Player,
   PowerUp,
   RainCoin,
 } from '../types/game';
 import { SKINS } from '../utils/skins';
+import {
+  EnvironmentTheme,
+  getEnvironmentTheme,
+  lerpColor,
+  THEME_CYBER_MIDNIGHT,
+} from '../utils/environmentThemes';
 
 interface Particle {
   x: number;
@@ -31,6 +38,26 @@ interface SpeedLine {
   alpha: number;
 }
 
+interface StarSeed {
+  xR: number;
+  yR: number;
+  size: number;
+  phase: number;
+}
+
+interface BuildingSeed {
+  xR: number;
+  w: number;
+  h: number;
+  hasAntenna: boolean;
+  windows: Array<{ rx: number; ry: number; color: string }>;
+}
+
+interface PeakSeed {
+  xR: number;
+  h: number;
+}
+
 interface GameCanvasProps {
   currentObstacle: Obstacle | null;
   player: Player;
@@ -47,6 +74,8 @@ interface GameCanvasProps {
   isRushMode?: boolean;
   ghostPlayer?: Player | null;
   ghostScore?: number;
+  gameMode?: GameMode;
+  survivalTimeSec?: number;
   onSwipeAction?: (action: Action) => void;
   onCollectRainCoin?: (id: string) => void;
   onCollectPowerUp?: (id: string) => void;
@@ -68,6 +97,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   isRushMode = false,
   ghostPlayer = null,
   ghostScore,
+  gameMode = 'CLASSIC',
+  survivalTimeSec = 0,
   onSwipeAction,
   onCollectRainCoin,
   onCollectPowerUp,
@@ -85,8 +116,79 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   const prevFeedbacksCountRef = useRef<number>(0);
   const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
 
-  // Initialize background star speed lines
+  // Dynamic Environment Theme References
+  const currentThemeRef = useRef<EnvironmentTheme>(THEME_CYBER_MIDNIGHT);
+  const targetThemeRef = useRef<EnvironmentTheme>(THEME_CYBER_MIDNIGHT);
+  const prevThemeRef = useRef<EnvironmentTheme>(THEME_CYBER_MIDNIGHT);
+  const themeTransitionProgressRef = useRef<number>(1);
+  const shoulderOffsetRef = useRef<number>(0);
+
+  // Deterministic seeds for background stars, city skyline, and mountain peaks
+  const starsSeedRef = useRef<StarSeed[]>([]);
+  const buildingsSeedRef = useRef<BuildingSeed[]>([]);
+  const mountainPeaksSeedRef = useRef<PeakSeed[]>([]);
+
+  // Initialize deterministic seeds once on mount
   useEffect(() => {
+    // 1. Fixed Stars (32 stars with steady coordinates)
+    if (starsSeedRef.current.length === 0) {
+      const stars: StarSeed[] = [];
+      for (let i = 0; i < 32; i++) {
+        stars.push({
+          xR: ((i * 37) % 100) / 100,
+          yR: ((i * 19) % 85) / 100,
+          size: 1.0 + (i % 3) * 0.65,
+          phase: (i * 1.3) % (Math.PI * 2),
+        });
+      }
+      starsSeedRef.current = stars;
+    }
+
+    // 2. City buildings (22 procedural skyline silhouettes)
+    if (buildingsSeedRef.current.length === 0) {
+      const blds: BuildingSeed[] = [];
+      const windowPalettes = ['#38bdf8', '#facc15', '#ec4899', '#34d399', '#c084fc'];
+      for (let i = 0; i < 22; i++) {
+        const w = 20 + ((i * 7) % 26);
+        const h = 28 + ((i * 13) % 58);
+        const wins: Array<{ rx: number; ry: number; color: string }> = [];
+        const rows = Math.floor(h / 12);
+        const cols = Math.floor(w / 8);
+        for (let r = 0; r < rows; r++) {
+          for (let c = 0; c < cols; c++) {
+            if ((r + c + i) % 3 !== 0) {
+              wins.push({
+                rx: 4 + c * 7,
+                ry: 5 + r * 10,
+                color: windowPalettes[(i + r + c) % windowPalettes.length],
+              });
+            }
+          }
+        }
+        blds.push({
+          xR: i / 21,
+          w,
+          h,
+          hasAntenna: i % 3 === 0,
+          windows: wins,
+        });
+      }
+      buildingsSeedRef.current = blds;
+    }
+
+    // 3. Mountain peaks (14 outrun ridge vertices)
+    if (mountainPeaksSeedRef.current.length === 0) {
+      const peaks: PeakSeed[] = [];
+      for (let i = 0; i < 14; i++) {
+        peaks.push({
+          xR: i / 13,
+          h: 24 + Math.sin(i * 1.8) * 18 + ((i * 11) % 18),
+        });
+      }
+      mountainPeaksSeedRef.current = peaks;
+    }
+
+    // Background star speed lines
     const lines: SpeedLine[] = [];
     for (let i = 0; i < 35; i++) {
       lines.push({
@@ -176,7 +278,52 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         ctx.translate(shakeX, shakeY);
       }
 
-      // --- 1. SKY & HORIZON GRADIENT ---
+      // --- 1. DYNAMIC ENVIRONMENT THEME RESOLUTION ---
+      const activeTargetTheme = getEnvironmentTheme(score, gameMode, survivalTimeSec);
+      if (activeTargetTheme.id !== targetThemeRef.current.id) {
+        prevThemeRef.current = { ...currentThemeRef.current };
+        targetThemeRef.current = activeTargetTheme;
+        themeTransitionProgressRef.current = 0;
+      }
+
+      themeTransitionProgressRef.current = Math.min(1, themeTransitionProgressRef.current + delta * 1.4);
+      const tProgress = themeTransitionProgressRef.current;
+      const prevT = prevThemeRef.current;
+      const nextT = targetThemeRef.current;
+
+      // Smoothly interpolated colors across active biome transition
+      const curSkyTop = lerpColor(prevT.skyTop, nextT.skyTop, tProgress);
+      const curSkyMid = lerpColor(prevT.skyMid, nextT.skyMid, tProgress);
+      const curSkyHorizon = lerpColor(prevT.skyHorizon, nextT.skyHorizon, tProgress);
+      const curSkyBottom = lerpColor(prevT.skyBottom, nextT.skyBottom, tProgress);
+      const curHorizonGlow = lerpColor(prevT.horizonGlowColor, nextT.horizonGlowColor, tProgress);
+      const curHorizonGlowInner = lerpColor(prevT.horizonGlowInner, nextT.horizonGlowInner, tProgress);
+      const curHorizonLine = lerpColor(prevT.horizonLineColor, nextT.horizonLineColor, tProgress);
+      const curRoadTop = lerpColor(prevT.roadTop, nextT.roadTop, tProgress);
+      const curRoadBottom = lerpColor(prevT.roadBottom, nextT.roadBottom, tProgress);
+      const curGridLine = lerpColor(prevT.gridLineColor, nextT.gridLineColor, tProgress);
+      const curTrackEdge = lerpColor(prevT.trackEdgeColor, nextT.trackEdgeColor, tProgress);
+      const curShoulderLight = lerpColor(prevT.shoulderLightColor, nextT.shoulderLightColor, tProgress);
+      const curLaneDivider = lerpColor(prevT.laneDividerColor, nextT.laneDividerColor, tProgress);
+
+      currentThemeRef.current = {
+        ...nextT,
+        skyTop: curSkyTop,
+        skyMid: curSkyMid,
+        skyHorizon: curSkyHorizon,
+        skyBottom: curSkyBottom,
+        horizonGlowColor: curHorizonGlow,
+        horizonGlowInner: curHorizonGlowInner,
+        horizonLineColor: curHorizonLine,
+        roadTop: curRoadTop,
+        roadBottom: curRoadBottom,
+        gridLineColor: curGridLine,
+        trackEdgeColor: curTrackEdge,
+        shoulderLightColor: curShoulderLight,
+        laneDividerColor: curLaneDivider,
+      };
+
+      // --- 2. DYNAMIC SKY GRADIENT ---
       const skyGrad = ctx.createLinearGradient(0, 0, 0, height);
       if (isRushMode) {
         skyGrad.addColorStop(0, '#3b0764');
@@ -197,55 +344,83 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         skyGrad.addColorStop(0.35, '#9a3412');
         skyGrad.addColorStop(1, '#1c0903');
       } else {
-        skyGrad.addColorStop(0, '#020617');
-        skyGrad.addColorStop(0.35, '#090d16');
-        skyGrad.addColorStop(0.36, '#111827');
-        skyGrad.addColorStop(1, '#030712');
+        skyGrad.addColorStop(0, curSkyTop);
+        skyGrad.addColorStop(0.35, curSkyMid);
+        skyGrad.addColorStop(0.36, curSkyHorizon);
+        skyGrad.addColorStop(1, curSkyBottom);
       }
       ctx.fillStyle = skyGrad;
       ctx.fillRect(0, 0, width, height);
 
-      // --- 2. DISTANT NEON CITY SILHOUETTES & STARS ---
       const horizonY = height * 0.35;
 
-      // Distant stars
-      ctx.fillStyle = feverActive || isRushMode ? 'rgba(250, 204, 21, 0.7)' : 'rgba(255, 255, 255, 0.4)';
-      for (let i = 0; i < 22; i++) {
-        const sx = (i * 37) % width;
-        const sy = (i * 19) % (horizonY - 20);
-        ctx.fillRect(sx, sy, 1.5, 1.5);
-      }
+      // --- 3. PARALLAX TWINKLING STARS ---
+      ctx.save();
+      const starBaseColor = feverActive || isRushMode ? '#fde047' : nextT.starColor;
+      starsSeedRef.current.forEach((s) => {
+        const sx = ((s.xR * width + runnerLaneXRef.current * 0.05) % width + width) % width;
+        const sy = s.yR * (horizonY - 8);
+        const twinkle = Math.sin(time * 0.003 + s.phase) * 0.35;
+        const alpha = Math.max(0.2, Math.min(0.95, 0.55 + twinkle));
+        ctx.fillStyle = starBaseColor;
+        ctx.globalAlpha = alpha;
+        ctx.fillRect(sx, sy, s.size, s.size);
+      });
+      ctx.restore();
 
-      // Distant neon sun / horizon glow (toned down so incoming obstacles remain 100% visible)
+      // --- 4. DYNAMIC CELESTIAL PHENOMENON (Synth Sun, Digital Moon, Aurora, Ringed Planet, Solar Corona) ---
+      renderCelestialWonder(ctx, width, horizonY, nextT.celestialType, nextT.accentColor, curSkyHorizon, time);
+
+      // --- 5. DISTANT HORIZON SILHOUETTES (2.5D PARALLAX DEPTH) ---
+      renderDistantSilhouette(
+        ctx,
+        width,
+        horizonY,
+        nextT.silhouetteType,
+        nextT.accentColor,
+        curSkyHorizon,
+        buildingsSeedRef.current,
+        mountainPeaksSeedRef.current,
+        runnerLaneXRef.current,
+        time
+      );
+
+      // --- 6. HORIZON GLOW & DIVIDING NEON LINE ---
       const sunGrad = ctx.createRadialGradient(
         width / 2, horizonY, 8,
-        width / 2, horizonY, width * 0.4
+        width / 2, horizonY, width * 0.42
       );
       if (isRushMode) {
-        sunGrad.addColorStop(0, 'rgba(244, 63, 94, 0.24)');
-        sunGrad.addColorStop(0.5, 'rgba(249, 115, 22, 0.10)');
+        sunGrad.addColorStop(0, 'rgba(244, 63, 94, 0.28)');
+        sunGrad.addColorStop(0.5, 'rgba(249, 115, 22, 0.12)');
         sunGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
       } else if (feverActive) {
-        sunGrad.addColorStop(0, 'rgba(236, 72, 153, 0.22)');
-        sunGrad.addColorStop(0.5, 'rgba(245, 158, 11, 0.08)');
+        sunGrad.addColorStop(0, 'rgba(236, 72, 153, 0.25)');
+        sunGrad.addColorStop(0.5, 'rgba(245, 158, 11, 0.10)');
         sunGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
       } else {
-        sunGrad.addColorStop(0, 'rgba(56, 189, 248, 0.16)');
-        sunGrad.addColorStop(0.6, 'rgba(99, 102, 241, 0.05)');
+        sunGrad.addColorStop(0, curHorizonGlowInner);
+        sunGrad.addColorStop(0.55, curHorizonGlow);
         sunGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
       }
       ctx.fillStyle = sunGrad;
       ctx.fillRect(0, 0, width, horizonY + 50);
 
       // Horizon line
-      ctx.strokeStyle = isRushMode ? '#f43f5e' : feverActive ? '#ec4899' : activeEvent ? activeEvent.color : '#38bdf8';
+      ctx.strokeStyle = isRushMode ? '#f43f5e' : feverActive ? '#ec4899' : activeEvent ? activeEvent.color : curHorizonLine;
       ctx.lineWidth = 2;
+      ctx.shadowColor = ctx.strokeStyle as string;
+      ctx.shadowBlur = 6;
       ctx.beginPath();
       ctx.moveTo(0, horizonY);
       ctx.lineTo(width, horizonY);
       ctx.stroke();
+      ctx.shadowBlur = 0;
 
-      // --- 3. 3-LANE PERSPECTIVE HIGHWAY ---
+      // Sector / Biome Callout on the distant skyline
+      renderSectorReadout(ctx, width, horizonY, nextT.code, nextT.name);
+
+      // --- 7. 3-LANE PERSPECTIVE HIGHWAY ---
       const trackTopWidth = width * 0.22;
       const trackBottomWidth = width * 0.92;
       const trackTopLeft = (width - trackTopWidth) / 2;
@@ -262,8 +437,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         roadGrad.addColorStop(0, '#2e1065');
         roadGrad.addColorStop(1, '#0f051d');
       } else {
-        roadGrad.addColorStop(0, '#0f172a');
-        roadGrad.addColorStop(1, '#020617');
+        roadGrad.addColorStop(0, curRoadTop);
+        roadGrad.addColorStop(1, curRoadBottom);
       }
       ctx.fillStyle = roadGrad;
       ctx.beginPath();
@@ -284,13 +459,14 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
       const baseSpeed = 400 * effectiveSpeed;
       roadOffsetRef.current = (roadOffsetRef.current + delta * baseSpeed) % 100;
-      const numHorizLines = 14;
+      shoulderOffsetRef.current = (shoulderOffsetRef.current + delta * baseSpeed * 0.24) % 100;
 
+      const numHorizLines = 14;
       ctx.strokeStyle = isRushMode
         ? 'rgba(244, 63, 94, 0.5)'
         : feverActive
         ? 'rgba(236, 72, 153, 0.4)'
-        : 'rgba(56, 189, 248, 0.25)';
+        : curGridLine;
       ctx.lineWidth = 1;
 
       for (let i = 0; i < numHorizLines; i++) {
@@ -315,12 +491,12 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             ? '#f43f5e'
             : feverActive
             ? '#ec4899'
-            : '#38bdf8'
+            : curTrackEdge
           : isRushMode
           ? 'rgba(251, 113, 133, 0.5)'
           : feverActive
           ? 'rgba(244, 114, 182, 0.5)'
-          : 'rgba(56, 189, 248, 0.4)';
+          : curLaneDivider;
         ctx.lineWidth = isBorder ? 3 : 1.5;
 
         if (!isBorder) {
@@ -338,6 +514,18 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         ctx.stroke();
       });
       ctx.setLineDash([]);
+
+      // Lateral Speed Reflector Beacons rushing past track shoulders
+      renderShoulderSpeedPillars(
+        ctx,
+        width,
+        height,
+        horizonY,
+        trackTopWidth,
+        trackBottomWidth,
+        shoulderOffsetRef.current,
+        isRushMode ? '#f43f5e' : feverActive ? '#ec4899' : curShoulderLight
+      );
 
       // --- 4. SPEED LINES (WARP EFFECT - subtle, non-obstructive) ---
       ctx.strokeStyle = isRushMode
@@ -437,6 +625,45 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       const runnerBaseX = width / 2 + runnerLaneXRef.current;
 
       renderRunnerCharacter(ctx, runnerBaseX, runnerBaseY, player, feverActive || isRushMode, delta, activePowerUps);
+
+      // --- 7B. RENDER GHOST RUNNER IF ACTIVE (Requirement 7: Ethereal glow, distinctive, 👻 GHOST label) ---
+      if (ghostPlayer) {
+        const targetGhostLaneX = ghostPlayer.lane * (trackBottomWidth / 3.4);
+        ghostLaneXRef.current += (targetGhostLaneX - ghostLaneXRef.current) * Math.min(delta * 22, 1);
+
+        // Subtle ethereal floating undulation so ghost feels spectral
+        const ghostHoverOffset = Math.sin(time * 0.007) * 4;
+        const ghostBaseY = height * 0.74 + ghostHoverOffset;
+        const ghostBaseX = width / 2 + ghostLaneXRef.current;
+
+        // Ethereal Ghost Halo & Label
+        ctx.save();
+        ctx.fillStyle = 'rgba(26, 16, 49, 0.85)';
+        ctx.strokeStyle = '#c084fc';
+        ctx.lineWidth = 1.2;
+        ctx.shadowColor = '#c084fc';
+        ctx.shadowBlur = 10;
+        ctx.beginPath();
+        const labelW = typeof ghostScore === 'number' ? 78 : 64;
+        ctx.roundRect(ghostBaseX - labelW / 2, ghostBaseY - 88, labelW, 18, 5);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.font = '800 9px "JetBrains Mono", monospace';
+        ctx.fillStyle = '#f3e8ff';
+        ctx.textAlign = 'center';
+        const ghostLabel = typeof ghostScore === 'number' ? `👻 GHOST · ${ghostScore}` : '👻 GHOST';
+        ctx.fillText(ghostLabel, ghostBaseX, ghostBaseY - 76);
+        ctx.restore();
+
+        // Render Ghost Runner with semi-transparency and spectral glowing aura
+        ctx.save();
+        ctx.globalAlpha = 0.52;
+        ctx.shadowColor = '#a855f7';
+        ctx.shadowBlur = 14;
+        renderRunnerCharacter(ctx, ghostBaseX, ghostBaseY, ghostPlayer, false, delta, undefined, true);
+        ctx.restore();
+      }
 
       // --- 8. RENDER COIN RAIN COINS IF ACTIVE ---
       if (rainCoins && rainCoins.length > 0) {
@@ -596,6 +823,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     activePowerUpPickup,
     rainCoins,
     isRushMode,
+    ghostPlayer,
+    ghostScore,
+    gameMode,
+    survivalTimeSec,
   ]);
 
   // Touch & Click Handlers (Swipe, Coin Rain click, Power-up click)
@@ -1084,7 +1315,8 @@ function renderRunnerCharacter(
   player: Player,
   isFever: boolean,
   delta: number,
-  activePowerUps?: ActivePowerUpState
+  activePowerUps?: ActivePowerUpState,
+  isGhost?: boolean
 ) {
   ctx.save();
   ctx.translate(x, y);
@@ -1181,20 +1413,26 @@ function renderRunnerCharacter(
   }
 
   // Torso / Suit
-  const suitColor = isFever ? '#ec4899' : player.currentAction === 'HURT' ? '#ef4444' : skin.suitColor;
+  const suitColor = isGhost
+    ? '#9333ea'
+    : isFever
+    ? '#ec4899'
+    : player.currentAction === 'HURT'
+    ? '#ef4444'
+    : skin.suitColor;
   ctx.fillStyle = suitColor;
   ctx.beginPath();
   ctx.roundRect(-14, -36, 28, 38, 8);
   ctx.fill();
 
   // Chest energy core
-  ctx.fillStyle = isFever ? '#fef08a' : skin.coreColor;
+  ctx.fillStyle = isGhost ? '#e9d5ff' : isFever ? '#fef08a' : skin.coreColor;
   ctx.beginPath();
   ctx.arc(0, -22, 6, 0, Math.PI * 2);
   ctx.fill();
 
   // Helmet
-  ctx.fillStyle = isFever ? '#3b0764' : skin.helmetColor;
+  ctx.fillStyle = isGhost ? '#581c87' : isFever ? '#3b0764' : skin.helmetColor;
   ctx.beginPath();
   ctx.roundRect(-16, -58, 32, 26, 12);
   ctx.fill();
@@ -1232,9 +1470,15 @@ function renderRunnerCharacter(
   }
 
   // Glowing Visor
-  ctx.fillStyle = isFever ? '#fbbf24' : player.currentAction === 'HURT' ? '#ef4444' : skin.visorColor;
-  ctx.shadowColor = ctx.fillStyle;
-  ctx.shadowBlur = 10;
+  ctx.fillStyle = isGhost
+    ? '#38bdf8'
+    : isFever
+    ? '#fbbf24'
+    : player.currentAction === 'HURT'
+    ? '#ef4444'
+    : skin.visorColor;
+  ctx.shadowColor = isGhost ? '#38bdf8' : ctx.fillStyle;
+  ctx.shadowBlur = isGhost ? 14 : 10;
   ctx.beginPath();
   ctx.roundRect(-13, -50, 26, 10, 4);
   ctx.fill();
@@ -1259,5 +1503,423 @@ function renderRunnerCharacter(
     ctx.stroke();
   }
 
+  ctx.restore();
+}
+
+// Helper: Render Dynamic Celestial Wonder (Synth Sun, Digital Moon, Aurora, Ringed Planet, Solar Corona, etc.)
+function renderCelestialWonder(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  horizonY: number,
+  celestialType: string,
+  accentColor: string,
+  skyHorizonColor: string,
+  time: number
+) {
+  if (celestialType === 'DIGITAL_MOON') {
+    const moonX = width * 0.74;
+    const moonY = horizonY * 0.44;
+    ctx.save();
+    ctx.translate(moonX, moonY);
+    ctx.shadowColor = accentColor;
+    ctx.shadowBlur = 18;
+    ctx.fillStyle = '#e0f2fe';
+    ctx.beginPath();
+    ctx.arc(0, 0, 18, -Math.PI * 0.6, Math.PI * 0.6, false);
+    ctx.arc(7, 0, 15, Math.PI * 0.55, -Math.PI * 0.55, true);
+    ctx.closePath();
+    ctx.fill();
+
+    // Digital orbit ring
+    ctx.strokeStyle = accentColor;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 6]);
+    ctx.beginPath();
+    ctx.arc(0, 0, 30, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  } else if (celestialType === 'SYNTH_SUN') {
+    const sunX = width / 2;
+    const sunY = horizonY - 4;
+    const sunR = Math.min(68, width * 0.17);
+    ctx.save();
+    ctx.shadowColor = '#f43f5e';
+    ctx.shadowBlur = 24;
+    const grad = ctx.createLinearGradient(0, sunY - sunR, 0, sunY + sunR);
+    grad.addColorStop(0, '#fef08a');
+    grad.addColorStop(0.3, '#facc15');
+    grad.addColorStop(0.65, '#f43f5e');
+    grad.addColorStop(1, '#9333ea');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(sunX, sunY, sunR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // Horizontal cuts (slits)
+    ctx.fillStyle = skyHorizonColor;
+    const cuts = [
+      { offset: sunR * 0.12, h: 2.2 },
+      { offset: sunR * 0.32, h: 3.5 },
+      { offset: sunR * 0.52, h: 5.0 },
+      { offset: sunR * 0.72, h: 7.0 },
+      { offset: sunR * 0.90, h: 9.0 },
+    ];
+    cuts.forEach((c) => {
+      ctx.fillRect(sunX - sunR - 4, sunY + c.offset, (sunR + 4) * 2, c.h);
+    });
+    ctx.restore();
+  } else if (celestialType === 'AURORA_SPIRES') {
+    ctx.save();
+    for (let a = 0; a < 3; a++) {
+      const wavePhase = time * 0.0012 + a * 1.8;
+      ctx.beginPath();
+      ctx.moveTo(0, horizonY * 0.15 + a * 14);
+      for (let x = 0; x <= width; x += 16) {
+        const y =
+          horizonY * (0.2 + a * 0.12) +
+          Math.sin(x * 0.012 + wavePhase) * 16 +
+          Math.cos(x * 0.024 - wavePhase * 0.8) * 10;
+        ctx.lineTo(x, y);
+      }
+      ctx.lineTo(width, horizonY * 0.85);
+      ctx.lineTo(0, horizonY * 0.85);
+      ctx.closePath();
+      const aGrad = ctx.createLinearGradient(0, 0, 0, horizonY);
+      aGrad.addColorStop(0, 'rgba(0, 0, 0, 0)');
+      aGrad.addColorStop(0.4, a % 2 === 0 ? 'rgba(16, 185, 129, 0.18)' : 'rgba(6, 182, 212, 0.15)');
+      aGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      ctx.fillStyle = aGrad;
+      ctx.fill();
+    }
+    ctx.restore();
+  } else if (celestialType === 'RINGED_PLANET') {
+    const pX = width * 0.28;
+    const pY = horizonY * 0.44;
+    const pR = 24;
+    ctx.save();
+    ctx.translate(pX, pY);
+    const nebGrad = ctx.createRadialGradient(0, 0, 4, 0, 0, 65);
+    nebGrad.addColorStop(0, 'rgba(192, 132, 252, 0.35)');
+    nebGrad.addColorStop(0.5, 'rgba(99, 102, 241, 0.15)');
+    nebGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    ctx.fillStyle = nebGrad;
+    ctx.beginPath();
+    ctx.arc(0, 0, 65, 0, Math.PI * 2);
+    ctx.fill();
+
+    const pGrad = ctx.createLinearGradient(-pR, -pR, pR, pR);
+    pGrad.addColorStop(0, '#e9d5ff');
+    pGrad.addColorStop(0.45, '#818cf8');
+    pGrad.addColorStop(1, '#1e1b4b');
+    ctx.fillStyle = pGrad;
+    ctx.shadowColor = '#c084fc';
+    ctx.shadowBlur = 15;
+    ctx.beginPath();
+    ctx.arc(0, 0, pR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    ctx.rotate(-Math.PI * 0.14);
+    ctx.strokeStyle = 'rgba(233, 213, 255, 0.85)';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 48, 12, 0, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = 'rgba(168, 85, 247, 0.5)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 56, 15, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  } else if (celestialType === 'SOLAR_CORONA') {
+    const sX = width / 2;
+    const sY = horizonY - 2;
+    const sR = Math.min(65, width * 0.17);
+    ctx.save();
+    const numRays = 12;
+    for (let r = 0; r < numRays; r++) {
+      const rayAngle = (r / numRays) * Math.PI + time * 0.0004;
+      if (rayAngle > Math.PI) continue;
+      const rayLen = sR * (1.35 + Math.sin(time * 0.004 + r) * 0.25);
+      ctx.strokeStyle = r % 2 === 0 ? 'rgba(250, 204, 21, 0.25)' : 'rgba(249, 115, 22, 0.2)';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(sX, sY);
+      ctx.lineTo(sX + Math.cos(rayAngle) * rayLen, sY - Math.sin(rayAngle) * rayLen);
+      ctx.stroke();
+    }
+    ctx.shadowColor = '#facc15';
+    ctx.shadowBlur = 30;
+    const cGrad = ctx.createRadialGradient(sX, sY, 4, sX, sY, sR);
+    cGrad.addColorStop(0, '#ffffff');
+    cGrad.addColorStop(0.3, '#fef08a');
+    cGrad.addColorStop(0.65, '#f59e0b');
+    cGrad.addColorStop(1, '#ea580c');
+    ctx.fillStyle = cGrad;
+    ctx.beginPath();
+    ctx.arc(sX, sY, sR, Math.PI, 0, false);
+    ctx.fill();
+    ctx.restore();
+  } else if (celestialType === 'SPECTRAL_ECLIPSE') {
+    const eX = width / 2;
+    const eY = horizonY - 12;
+    const eR = 36;
+    ctx.save();
+    ctx.shadowColor = '#c084fc';
+    ctx.shadowBlur = 28;
+    const gGrad = ctx.createRadialGradient(eX, eY, eR * 0.8, eX, eY, eR * 1.9);
+    gGrad.addColorStop(0, 'rgba(216, 180, 254, 0.9)');
+    gGrad.addColorStop(0.4, 'rgba(168, 85, 247, 0.4)');
+    gGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    ctx.fillStyle = gGrad;
+    ctx.beginPath();
+    ctx.arc(eX, eY, eR * 1.9, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#06010d';
+    ctx.beginPath();
+    ctx.arc(eX, eY, eR, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = '#e9d5ff';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.restore();
+  } else if (celestialType === 'COSMIC_SINGULARITY') {
+    const cX = width / 2;
+    const cY = horizonY - 14;
+    const cR = 22;
+    ctx.save();
+    ctx.shadowColor = '#38bdf8';
+    ctx.shadowBlur = 22;
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.75)';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.ellipse(cX, cY, 68, 14, -0.15, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = 'rgba(244, 63, 94, 0.6)';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.ellipse(cX, cY, 78, 17, -0.15, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.fillStyle = '#000000';
+    ctx.beginPath();
+    ctx.arc(cX, cY, cR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+    ctx.restore();
+  } else if (celestialType === 'HOLO_RADAR') {
+    const rX = width / 2;
+    const rY = horizonY * 0.46;
+    ctx.save();
+    ctx.translate(rX, rY);
+    ctx.strokeStyle = 'rgba(6, 182, 212, 0.45)';
+    ctx.lineWidth = 1;
+    [18, 36, 54].forEach((r) => {
+      ctx.beginPath();
+      ctx.arc(0, 0, r, 0, Math.PI * 2);
+      ctx.stroke();
+    });
+    const armAngle = time * 0.0018;
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.85)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(Math.cos(armAngle) * 54, Math.sin(armAngle) * 54);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(6, 182, 212, 0.3)';
+    ctx.beginPath();
+    ctx.moveTo(-60, 0);
+    ctx.lineTo(60, 0);
+    ctx.moveTo(0, -60);
+    ctx.lineTo(0, 60);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+// Helper: Render Distant Silhouette (Skyscrapers, Wireframe Peaks, Techno Spires, Solar Pylons, etc.)
+function renderDistantSilhouette(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  horizonY: number,
+  silhouetteType: string,
+  accentColor: string,
+  skyHorizonColor: string,
+  buildingsSeed: BuildingSeed[],
+  peaksSeed: PeakSeed[],
+  runnerLaneOffset: number,
+  time: number
+) {
+  const parallaxX = runnerLaneOffset * 0.06;
+  ctx.save();
+
+  if (silhouetteType === 'WIREFRAME_PEAKS') {
+    ctx.translate(parallaxX, 0);
+    ctx.beginPath();
+    ctx.moveTo(0, horizonY);
+    peaksSeed.forEach((p) => {
+      const px = p.xR * width;
+      const py = horizonY - p.h;
+      ctx.lineTo(px, py);
+    });
+    ctx.lineTo(width, horizonY);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(15, 3, 24, 0.9)';
+    ctx.fill();
+
+    ctx.strokeStyle = accentColor;
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+
+    ctx.strokeStyle = `${accentColor}44`;
+    ctx.lineWidth = 1;
+    peaksSeed.forEach((p, idx) => {
+      if (idx % 2 === 0) {
+        ctx.beginPath();
+        ctx.moveTo(p.xR * width, horizonY - p.h);
+        ctx.lineTo(p.xR * width, horizonY);
+        ctx.stroke();
+      }
+    });
+  } else if (silhouetteType === 'SKYSCRAPERS' || silhouetteType === 'TECHNO_SPIRES') {
+    ctx.translate(parallaxX, 0);
+    buildingsSeed.forEach((b) => {
+      const bx = b.xR * (width + 60) - 30;
+      const by = horizonY - b.h;
+
+      ctx.fillStyle = '#080d1a';
+      ctx.fillRect(bx, by, b.w, b.h);
+
+      ctx.fillStyle = accentColor;
+      ctx.fillRect(bx, by, b.w, 1.5);
+
+      b.windows.forEach((w) => {
+        if (by + w.ry < horizonY - 4 && bx + w.rx < bx + b.w - 3) {
+          ctx.fillStyle = w.color;
+          ctx.fillRect(bx + w.rx, by + w.ry, 2.5, 3.5);
+        }
+      });
+
+      if (b.hasAntenna) {
+        ctx.strokeStyle = '#475569';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(bx + b.w / 2, by);
+        ctx.lineTo(bx + b.w / 2, by - 14);
+        ctx.stroke();
+
+        const blink = Math.sin(time * 0.005 + b.xR * 20) > 0.3;
+        ctx.fillStyle = blink ? '#ef4444' : '#1e293b';
+        ctx.beginPath();
+        ctx.arc(bx + b.w / 2, by - 14, 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    });
+  } else if (silhouetteType === 'CRYSTAL_RIDGES' || silhouetteType === 'SPECTRAL_RUINS') {
+    ctx.translate(parallaxX, 0);
+    ctx.beginPath();
+    ctx.moveTo(0, horizonY);
+    for (let i = 0; i < 16; i++) {
+      const cx = (i / 15) * width;
+      const ch = 20 + Math.sin(i * 2.3 + time * 0.0008) * 14 + (i % 3) * 12;
+      ctx.lineTo(cx, horizonY - ch);
+    }
+    ctx.lineTo(width, horizonY);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(10, 4, 25, 0.92)';
+    ctx.fill();
+
+    ctx.strokeStyle = accentColor;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  } else if (silhouetteType === 'SOLAR_PYLONS') {
+    ctx.translate(parallaxX, 0);
+    const pylonCount = 6;
+    for (let p = 0; p < pylonCount; p++) {
+      const px = (p / (pylonCount - 1)) * (width * 0.85) + width * 0.075;
+      const ph = 50 + (p % 2) * 22;
+      ctx.fillStyle = '#1c0804';
+      ctx.beginPath();
+      ctx.moveTo(px - 6, horizonY);
+      ctx.lineTo(px - 2, horizonY - ph);
+      ctx.lineTo(px + 2, horizonY - ph);
+      ctx.lineTo(px + 6, horizonY);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = '#facc15';
+      ctx.fillRect(px - 1, horizonY - ph + 6, 2, ph - 12);
+    }
+  } else if (silhouetteType === 'HOLO_DEM') {
+    ctx.translate(parallaxX, 0);
+    ctx.strokeStyle = 'rgba(6, 182, 212, 0.6)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let x = 0; x <= width; x += 30) {
+      const yh = horizonY - 15 - Math.sin(x * 0.02) * 12;
+      ctx.moveTo(x, horizonY);
+      ctx.lineTo(x, yh);
+    }
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+// Helper: Render Sector / Biome Readout
+function renderSectorReadout(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  horizonY: number,
+  code: string,
+  name: string
+) {
+  ctx.save();
+  ctx.font = '800 8.5px "JetBrains Mono", monospace';
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.42)';
+  ctx.textAlign = 'center';
+  ctx.fillText(`// ${code} · ${name}`, width / 2, horizonY - 7);
+  ctx.restore();
+}
+
+// Helper: Render Lateral Speed Reflector Beacons rushing past track shoulders
+function renderShoulderSpeedPillars(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  horizonY: number,
+  trackTopWidth: number,
+  trackBottomWidth: number,
+  offset: number,
+  shoulderColor: string
+) {
+  ctx.save();
+  const numPillars = 8;
+  for (let i = 0; i < numPillars; i++) {
+    const t = ((i * (100 / numPillars) + offset) % 100) / 100;
+    if (t < 0.06) continue;
+    const py = horizonY + Math.pow(t, 2.2) * (height - horizonY);
+    const wAtY = trackTopWidth + Math.pow(t, 2.2) * (trackBottomWidth - trackTopWidth);
+    const lx = (width - wAtY) / 2 - 5;
+    const rx = lx + wAtY + 10;
+
+    const pillarHeight = Math.max(2, Math.pow(t, 2.2) * 20);
+    const pillarWidth = Math.max(1.5, Math.pow(t, 2.2) * 4);
+
+    ctx.fillStyle = shoulderColor;
+    ctx.shadowColor = shoulderColor;
+    ctx.shadowBlur = Math.min(10, Math.pow(t, 2.2) * 12);
+
+    ctx.fillRect(lx - pillarWidth, py - pillarHeight, pillarWidth, pillarHeight);
+    ctx.fillRect(rx, py - pillarHeight, pillarWidth, pillarHeight);
+  }
   ctx.restore();
 }

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Play,
   Infinity,
@@ -74,6 +74,7 @@ export const StartScreen: React.FC<StartScreenProps> = ({
   const progression = getPlayerProgression();
   const titleInfo = TITLES[progression.equippedTitle] || TITLES.ROOKIE;
   const ghostRun = getGhostRun();
+  const [showNoGhostModal, setShowNoGhostModal] = useState<boolean>(false);
 
   return (
     <div className="absolute inset-0 z-30 flex flex-col items-center justify-between p-3.5 sm:p-5 bg-slate-950/95 backdrop-blur-xl text-white select-none overflow-y-auto">
@@ -267,7 +268,11 @@ export const StartScreen: React.FC<StartScreenProps> = ({
           type="button"
           onClick={() => {
             soundEngine.playClick();
-            onPlayGhost();
+            if (!ghostRun) {
+              setShowNoGhostModal(true);
+            } else {
+              onPlayGhost();
+            }
           }}
           className="w-full h-11 sm:h-12 px-3.5 sm:px-4 rounded-2xl bg-gradient-to-r from-purple-950/90 via-indigo-950/90 to-purple-900/90 hover:from-purple-900 hover:to-indigo-900 border border-purple-500/50 hover:border-purple-400 text-purple-100 font-display flex items-center justify-between shadow-[0_0_20px_rgba(168,85,247,0.25)] hover:shadow-[0_0_25px_rgba(168,85,247,0.4)] active:scale-[0.98] transition-all cursor-pointer group"
         >
@@ -438,6 +443,47 @@ export const StartScreen: React.FC<StartScreenProps> = ({
           </button>
         </div>
       </div>
+
+      {/* No Ghost Run Yet Modal (Requirement 3: "Play one game first to create your Ghost!" + PLAY button) */}
+      {showNoGhostModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="w-full max-w-sm rounded-3xl bg-slate-900 border border-purple-500/50 p-6 text-center shadow-[0_0_35px_rgba(168,85,247,0.3)] flex flex-col items-center">
+            <div className="w-16 h-16 rounded-2xl bg-purple-500/20 border border-purple-400/40 flex items-center justify-center text-3xl mb-3 shadow-[0_0_15px_rgba(168,85,247,0.4)]">
+              👻
+            </div>
+            <h3 className="font-display text-xl font-black text-white tracking-wide mb-1">
+              GHOST MODE
+            </h3>
+            <p className="text-sm text-purple-200/90 font-medium mb-6 leading-relaxed">
+              Play one game first to create your Ghost!
+            </p>
+            <div className="flex flex-col gap-2.5 w-full">
+              <button
+                type="button"
+                onClick={() => {
+                  soundEngine.playClick();
+                  setShowNoGhostModal(false);
+                  onPlayClassic();
+                }}
+                className="w-full py-3.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-500 text-slate-950 font-display font-black text-base tracking-wide flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(56,189,248,0.4)] hover:brightness-110 active:scale-95 transition-all cursor-pointer"
+              >
+                <Play className="w-4 h-4 fill-slate-950" />
+                <span>PLAY</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  soundEngine.playClick();
+                  setShowNoGhostModal(false);
+                }}
+                className="w-full py-2.5 rounded-xl bg-slate-800/80 hover:bg-slate-800 text-slate-400 text-xs font-bold transition-all cursor-pointer"
+              >
+                CANCEL
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

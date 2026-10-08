@@ -28,6 +28,8 @@ import {
   UserStats,
   PlayerProgression,
   PlayerTitleId,
+  GhostRun,
+  GhostEvent,
 } from './types/game';
 import {
   generateBossObstacle,
@@ -53,6 +55,7 @@ import {
   getDailyChallenge,
   getDailyStreak,
   getEquippedSkin,
+  getGhostRun,
   getMissions,
   getPurchasedSkins,
   getUserStats,
@@ -63,6 +66,7 @@ import {
   saveBestScore,
   saveEndlessBestScore,
   saveEndlessBestSurvival,
+  saveGhostRun,
   setEquippedSkin,
   updateDailyChallengeProgress,
   updateMissionsProgress,
@@ -70,6 +74,7 @@ import {
 } from './utils/storage';
 import { getRankForScore, hasRankedUp } from './utils/ranks';
 import { TITLES, addPlayerXp, getPlayerProgression } from './utils/progression';
+import { getEnvironmentTheme } from './utils/environmentThemes';
 import { soundEngine } from './audio/soundEngine';
 import { GameCanvas } from './components/GameCanvas';
 import { ActionControls } from './components/ActionControls';
@@ -249,6 +254,20 @@ export default function App() {
     invulnerableTime: 0,
     skinId: getEquippedSkin(),
   });
+
+  // Ghost Runner state (Requirement: Ghost Mode 👻)
+  const [ghostPlayer, setGhostPlayer] = useState<Player | null>(null);
+  const [ghostScore, setGhostScore] = useState<number | undefined>(undefined);
+  const activeGhostRunRef = useRef<GhostRun | null>(null);
+  const currentRunEventsRef = useRef<GhostEvent[]>([]);
+  const [ghostDefeatedState, setGhostDefeatedState] = useState<{
+    beatGhost: boolean;
+    isCrushed: boolean;
+    ghostTargetScore?: number;
+    ghostCoinBonus: number;
+    ghostXpBonus: number;
+  } | null>(null);
+  const prevBiomeIdRef = useRef<string>('CYBER_MIDNIGHT');
 
   // Mutable game loop references to prevent closure staleness
   const stateRef = useRef({
@@ -431,6 +450,33 @@ export default function App() {
     soundEngine.playClick();
     setGameMode(selectedMode);
     stateRef.current.gameMode = selectedMode;
+    currentRunEventsRef.current = [];
+    setGhostDefeatedState(null);
+    prevBiomeIdRef.current = getEnvironmentTheme(0, selectedMode, 0).id;
+
+    if (selectedMode === 'GHOST') {
+      const ghost = getGhostRun();
+      activeGhostRunRef.current = ghost;
+      if (ghost) {
+        setGhostPlayer({
+          lane: 0,
+          targetLane: 0,
+          currentAction: 'RUNNING',
+          actionProgress: 0,
+          invulnerableTime: 0,
+          skinId: ghost.skinId || 'classic',
+        });
+        setGhostScore(0);
+      } else {
+        setGhostPlayer(null);
+        setGhostScore(undefined);
+      }
+    } else {
+      activeGhostRunRef.current = null;
+      setGhostPlayer(null);
+      setGhostScore(undefined);
+    }
+
     setGameState('COUNTDOWN');
   };
 
@@ -529,6 +575,14 @@ export default function App() {
 
     setGameState('PLAYING');
     soundEngine.startBgm(1.0, false);
+
+    if (stateRef.current.gameMode === 'GHOST') {
+      if (activeGhostRunRef.current) {
+        addFeedback('GHOST ACTIVE 👻', 'GOOD', `RACE VS BEST: ${activeGhostRunRef.current.finalScore}`);
+      } else {
+        addFeedback('RECORDING GHOST 👻', 'GOOD', 'Set your benchmark run!');
+      }
+    }
   };
 
   // Pause / Resume Handlers
@@ -589,6 +643,39 @@ export default function App() {
       saveEndlessBestScore(finalScore);
       saveEndlessBestSurvival(runDurationSec);
     }
+
+    // Ghost Mode Rewards & Record Beating (Requirement 4 & 6)
+    let beatGhost = false;
+    let isCrushed = false;
+    const ghostBenchmark = activeGhostRunRef.current?.finalScore ?? getGhostRun()?.finalScore;
+    let ghostTargetScore = ghostBenchmark;
+    let ghostCoinBonus = 0;
+    let ghostXpBonus = 0;
+
+    if (currentMode === 'GHOST' && typeof ghostTargetScore === 'number') {
+      if (finalScore > ghostTargetScore) {
+        beatGhost = true;
+        isCrushed = (finalScore - ghostTargetScore) >= 5;
+        ghostCoinBonus = isCrushed ? 40 : 25; // +25 coins base, +15 if crushed
+        ghostXpBonus = isCrushed ? 75 : 50;   // +50 XP base, +25 if crushed
+        earnedCoins += ghostCoinBonus;
+        stateRef.current.xpEarnedThisRun += ghostXpBonus;
+        soundEngine.playMilestone();
+        setIsNewRecord(true);
+        triggerRewardToast(
+          isCrushed ? '👻 GHOST CRUSHED! (+40 🪙, +75 XP)' : '👻 GHOST DEFEATED! (+25 🪙, +50 XP)',
+          ghostCoinBonus
+        );
+      }
+    }
+
+    setGhostDefeatedState({
+      beatGhost,
+      isCrushed,
+      ghostTargetScore,
+      ghostCoinBonus,
+      ghostXpBonus,
+    });
 
     // Persist coins earned to user vault
     if (earnedCoins > 0) {
@@ -739,20 +826,34 @@ export default function App() {
     // Automatically update player's local leaderboard score
     updatePlayerLeaderboardScore(newBest, currentMode);
 
-    // Check high score
-    if (finalScore > bestScore) {
-      setBestScore(finalScore);
+    // Check high score & personal record (Requirement 6)
+    if (finalScore > bestScore || (currentMode === 'GHOST' && beatGhost)) {
+      const updatedBest = Math.max(bestScore, finalScore);
+      setBestScore(updatedBest);
       setIsNewRecord(true);
-      saveBestScore(finalScore);
+      saveBestScore(updatedBest);
       triggerRewardPopup({
         type: 'NEW_RECORD',
         title: '★ NEW RECORD! ★',
-        subtitle: `Score: ${finalScore}`,
+        subtitle: `Score: ${updatedBest}`,
       });
     }
     if (finalMaxCombo > bestCombo) {
       setBestCombo(finalMaxCombo);
       saveBestCombo(finalMaxCombo);
+    }
+
+    // Save or update Ghost benchmark run
+    const prevGhost = getGhostRun();
+    if (currentRunEventsRef.current.length > 0 && (!prevGhost || finalScore >= prevGhost.finalScore)) {
+      saveGhostRun({
+        id: `ghost_${Date.now()}`,
+        date: new Date().toISOString().split('T')[0],
+        finalScore,
+        survivalTimeSec: Math.round(runDurationSec),
+        skinId: equippedSkin,
+        events: currentRunEventsRef.current,
+      });
     }
   }, [
     bestScore,
@@ -915,6 +1016,17 @@ export default function App() {
 
       const p = stateRef.current.player;
       if (p.invulnerableTime > 400) return; // Brief immunity buffer after hurt
+
+      const curRunTime = performance.now() - (runStartTimeRef.current || performance.now());
+      let actLane: -1 | 0 | 1 = p.lane;
+      if (action === 'LEFT') actLane = -1;
+      else if (action === 'RIGHT') actLane = 1;
+      currentRunEventsRef.current.push({
+        t: Math.round(curRunTime),
+        a: action,
+        l: actLane,
+        s: stateRef.current.score,
+      });
 
       const obs = stateRef.current.currentObstacle;
       if (!obs || obs.cleared || obs.failed) {
@@ -1756,6 +1868,47 @@ export default function App() {
           p.invulnerableTime = newInv;
         }
 
+        // 7B. Update Ghost Runner State (if playing in GHOST mode)
+        if (stateRef.current.gameMode === 'GHOST' && activeGhostRunRef.current) {
+          const elapsed = performance.now() - (runStartTimeRef.current || performance.now());
+          const events = activeGhostRunRef.current.events;
+          if (events && events.length > 0) {
+            let latestIdx = -1;
+            for (let i = 0; i < events.length; i++) {
+              if (events[i].t <= elapsed) {
+                latestIdx = i;
+              } else {
+                break;
+              }
+            }
+
+            if (latestIdx >= 0) {
+              const ev = events[latestIdx];
+              const timeSinceEv = elapsed - ev.t;
+              const isActing = timeSinceEv < 320;
+              const actProgress = Math.min(1, timeSinceEv / 320);
+
+              let gAction: PlayerAction = 'RUNNING';
+              if (isActing) {
+                if (ev.a === 'JUMP') gAction = 'JUMPING';
+                else if (ev.a === 'SLIDE') gAction = 'SLIDING';
+                else if (ev.a === 'LEFT') gAction = 'DODGE_LEFT';
+                else if (ev.a === 'RIGHT') gAction = 'DODGE_RIGHT';
+              }
+
+              setGhostPlayer({
+                lane: ev.l,
+                targetLane: ev.l,
+                currentAction: gAction,
+                actionProgress: actProgress,
+                invulnerableTime: 0,
+                skinId: activeGhostRunRef.current.skinId || 'classic',
+              });
+              setGhostScore(ev.s);
+            }
+          }
+        }
+
         // 8. Obstacle Lifecycle & Countdown (Support SLOW_TIME power-up)
         const obs = stateRef.current.currentObstacle;
         if (obs && !obs.cleared && !obs.failed) {
@@ -1921,6 +2074,8 @@ export default function App() {
                 : undefined
             }
             isMuted={isMuted}
+            ghostScore={gameMode === 'GHOST' ? ghostScore : undefined}
+            ghostTargetScore={gameMode === 'GHOST' ? activeGhostRunRef.current?.finalScore : undefined}
             onToggleMute={handleToggleMute}
             onPause={handlePause}
           />
@@ -1943,6 +2098,8 @@ export default function App() {
           activePowerUpPickup={activePowerUpPickup}
           rainCoins={rainCoins}
           isRushMode={isRushMode}
+          ghostPlayer={gameMode === 'GHOST' ? ghostPlayer : null}
+          ghostScore={gameMode === 'GHOST' ? ghostScore : undefined}
           onSwipeAction={handlePlayerAction}
           onCollectRainCoin={handleCollectRainCoin}
           onCollectPowerUp={handleCollectPowerUp}
@@ -1982,6 +2139,7 @@ export default function App() {
           isMuted={isMuted}
           onToggleMute={handleToggleMute}
           onPlayClassic={() => handleStartPlay('CLASSIC')}
+          onPlayGhost={() => handleStartPlay('GHOST')}
           onPlayEndless={() => handleStartPlay('ENDLESS')}
           onOpenChallenges={() => setIsChallengesOpen(true)}
           onOpenShop={() => setGameState('SHOP')}
@@ -2045,6 +2203,11 @@ export default function App() {
           playerXp={playerProgression.currentXp}
           playerXpNext={playerProgression.xpForNextLevel}
           hasLeveledUp={levelUpModalData !== null}
+          beatGhost={ghostDefeatedState?.beatGhost}
+          isCrushed={ghostDefeatedState?.isCrushed}
+          ghostTargetScore={ghostDefeatedState?.ghostTargetScore}
+          ghostCoinBonus={ghostDefeatedState?.ghostCoinBonus}
+          ghostXpBonus={ghostDefeatedState?.ghostXpBonus}
           onShowLevelUp={() => {}}
           onPlayAgain={() => handleStartPlay(gameMode)}
           onHome={handleGoHome}

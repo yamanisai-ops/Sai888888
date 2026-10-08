@@ -289,6 +289,19 @@ export const GameHUD: React.FC<GameHUDProps> = ({
         </div>
       )}
 
+      {mode === 'GHOST' && typeof ghostScore !== 'number' && (
+        <div className="mt-1 w-full px-2 sm:px-2.5 py-1 rounded-xl bg-purple-950/85 border border-purple-500/60 shadow-[0_0_15px_rgba(168,85,247,0.25)] flex items-center justify-between text-[10px]">
+          <div className="flex items-center gap-1">
+            <span className="text-[8px] uppercase font-bold text-slate-300">SCORE:</span>
+            <span className="font-display font-black text-cyan-300 font-mono-numbers text-xs">{score}</span>
+          </div>
+          <span className="px-2 py-0.5 rounded-md bg-purple-900/80 border border-purple-400/50 text-purple-200 text-[9px] font-bold uppercase">
+            RECORDING YOUR GHOST RUN 👻
+          </span>
+          <span className="text-[10px] text-purple-300 font-mono-numbers font-bold">1ST RUN</span>
+        </div>
+      )}
+
       {/* 3. Streamlined Combo & Fever / Reaction Meter (Slim, elegant bar) */}
       <div className="mt-1 w-full flex items-center gap-2">
         {/* Left: Slim Combo Bar with ticks */}
