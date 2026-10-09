@@ -102,6 +102,7 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
     const startTime = performance.now();
     const duration = 650;
     let animId: number;
+    let rewardTimerId: number | null = null;
 
     const animateCount = (now: number) => {
       const elapsed = now - startTime;
@@ -120,7 +121,7 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
         setDisplayCoins(coinsEarned);
         setDisplayXp(xpEarned);
         setIsScoreDone(true);
-        setTimeout(() => setIsRewardDone(true), 150);
+        rewardTimerId = window.setTimeout(() => setIsRewardDone(true), 150);
       }
     };
 
@@ -139,7 +140,12 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
       }
     }
 
-    return () => cancelAnimationFrame(animId);
+    return () => {
+      cancelAnimationFrame(animId);
+      if (rewardTimerId !== null) {
+        clearTimeout(rewardTimerId);
+      }
+    };
   }, [isNewRecord, score, coinsEarned, xpEarned, mode, beatGhost]);
 
   const handleShare = async () => {
@@ -451,7 +457,7 @@ Can you beat me?`;
       </div>
 
       {/* Action Buttons: PLAY AGAIN & Secondary Controls with Smooth Transitions */}
-      <div className="w-full max-w-md flex flex-col gap-1.5 pb-1">
+      <div className="w-full max-w-md flex flex-col gap-1.5 pb-2 pb-safe">
         {/* PRIMARY BUTTON: PLAY AGAIN */}
         <button
           type="button"

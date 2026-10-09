@@ -150,19 +150,21 @@ export function getUserStats(): UserStats {
   if (raw) {
     try {
       const parsed = JSON.parse(raw);
-      return {
-        totalGames: parsed.totalGames || 0,
-        totalPerfects: parsed.totalPerfects || 0,
-        totalObstaclesAvoided: parsed.totalObstaclesAvoided || 0,
-        totalCoinsEarned: parsed.totalCoinsEarned || 0,
-        totalPowerUpsCollected: parsed.totalPowerUpsCollected || 0,
-        totalNearMisses: parsed.totalNearMisses || 0,
-        totalBossChallenges: parsed.totalBossChallenges || 0,
-        bossesDefeated: parsed.bossesDefeated || 0,
-        longestSurvivalTimeSec: parsed.longestSurvivalTimeSec || 0,
-      };
+      if (parsed && typeof parsed === 'object') {
+        return {
+          totalGames: Number(parsed.totalGames) || 0,
+          totalPerfects: Number(parsed.totalPerfects) || 0,
+          totalObstaclesAvoided: Number(parsed.totalObstaclesAvoided) || 0,
+          totalCoinsEarned: Number(parsed.totalCoinsEarned) || 0,
+          totalPowerUpsCollected: Number(parsed.totalPowerUpsCollected) || 0,
+          totalNearMisses: Number(parsed.totalNearMisses) || 0,
+          totalBossChallenges: Number(parsed.totalBossChallenges) || 0,
+          bossesDefeated: Number(parsed.bossesDefeated) || 0,
+          longestSurvivalTimeSec: Number(parsed.longestSurvivalTimeSec) || 0,
+        };
+      }
     } catch {
-      // ignore
+      // ignore corrupt data
     }
   }
   return {
@@ -364,9 +366,23 @@ export function getMissions(): Mission[] {
   const raw = safeGetItem('one_second_missions_v1');
   if (raw) {
     try {
-      return JSON.parse(raw);
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return DEFAULT_MISSIONS.map((tmpl) => {
+          const saved = parsed.find((p: any) => p && p.id === tmpl.id);
+          if (saved) {
+            return {
+              ...tmpl,
+              progress: typeof saved.progress === 'number' ? saved.progress : 0,
+              completed: Boolean(saved.completed),
+              claimed: Boolean(saved.claimed),
+            };
+          }
+          return tmpl;
+        });
+      }
     } catch {
-      // ignore
+      // ignore corrupt data
     }
   }
   safeSetItem('one_second_missions_v1', JSON.stringify(DEFAULT_MISSIONS));
@@ -735,8 +751,22 @@ export function getChallenges(): Challenge[] {
   if (raw) {
     try {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length === INITIAL_CHALLENGES.length) {
-        return parsed;
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return INITIAL_CHALLENGES.map((tmpl, idx) => {
+          const saved = parsed.find((p: any) => p && p.id === tmpl.id);
+          if (saved) {
+            return {
+              ...tmpl,
+              unlocked: saved.unlocked ?? (idx === 0),
+              completed: Boolean(saved.completed),
+            };
+          }
+          return {
+            ...tmpl,
+            unlocked: idx === 0,
+            completed: false,
+          };
+        });
       }
     } catch {
       // fallback
@@ -878,38 +908,91 @@ export function hasGhostRun(): boolean {
   return getGhostRun() !== null;
 }
 
-// --- V8 DATA SAFETY & MIGRATION INITIALIZER ---
+// --- V9 DATA SAFETY & MIGRATION INITIALIZER ---
 
 export function initializeSaveDataMigration(): void {
   try {
     const version = safeGetItem('one_second_schema_version');
-    if (!version || parseInt(version, 10) < 8) {
-      // Safe migration: preserve any existing scores/coins, populate progression defaults
+    const numericVersion = version ? parseInt(version, 10) : 0;
+
+    if (numericVersion < 9) {
+      // Safe migration: verify and normalize all player progression and gameplay records
       getLeaderboard();
       getDailyStreak();
       getChallenges();
+      getMissions();
+      getUserStats();
+      getPurchasedSkins();
 
-      if (!safeGetItem('one_second_player_level')) {
+      // Ensure progression primitives have safe numeric/string values
+      const level = safeGetItem('one_second_player_level');
+      if (!level || isNaN(parseInt(level, 10)) || parseInt(level, 10) < 1) {
         safeSetItem('one_second_player_level', '1');
       }
-      if (!safeGetItem('one_second_player_xp')) {
+
+      const xp = safeGetItem('one_second_player_xp');
+      if (!xp || isNaN(parseInt(xp, 10)) || parseInt(xp, 10) < 0) {
         safeSetItem('one_second_player_xp', '0');
       }
-      if (!safeGetItem('one_second_total_xp')) {
+
+      const totalXp = safeGetItem('one_second_total_xp');
+      if (!totalXp || isNaN(parseInt(totalXp, 10)) || parseInt(totalXp, 10) < 0) {
         safeSetItem('one_second_total_xp', '0');
       }
-      if (!safeGetItem('one_second_equipped_title')) {
+
+      const equippedTitle = safeGetItem('one_second_equipped_title');
+      if (!equippedTitle) {
         safeSetItem('one_second_equipped_title', 'ROOKIE');
       }
-      if (!safeGetItem('one_second_unlocked_titles')) {
+
+      const unlockedTitles = safeGetItem('one_second_unlocked_titles');
+      if (!unlockedTitles) {
         safeSetItem('one_second_unlocked_titles', JSON.stringify(['ROOKIE']));
+      } else {
+        try {
+          const parsedTitles = JSON.parse(unlockedTitles);
+          if (!Array.isArray(parsedTitles) || !parsedTitles.includes('ROOKIE')) {
+            safeSetItem('one_second_unlocked_titles', JSON.stringify(['ROOKIE']));
+          }
+        } catch {
+          safeSetItem('one_second_unlocked_titles', JSON.stringify(['ROOKIE']));
+        }
       }
 
-      safeSetItem('one_second_schema_version', '8');
+      // Ensure equipped skin is valid
+      const equippedSkin = safeGetItem('one_second_equipped_skin');
+      if (!equippedSkin || !(equippedSkin in SKINS)) {
+        safeSetItem('one_second_equipped_skin', 'classic');
+      }
+
+      safeSetItem('one_second_schema_version', '9');
     }
   } catch {
-    // Ignore migration errors, safeGetItem handles corrupt states
+    // Fail-safe recovery: safeGetItem handles corrupt fallback transparently
   }
+}
+
+// Performance mode settings (Requirement 9: Smooth performance on low-end Android phones)
+export function getPerformanceMode(): boolean {
+  const saved = safeGetItem('one_second_perf_mode');
+  if (saved !== null) {
+    return saved === 'true';
+  }
+  // Auto-detect budget mobile hardware
+  if (typeof navigator !== 'undefined') {
+    const nav = navigator as any;
+    if (typeof nav.hardwareConcurrency === 'number' && nav.hardwareConcurrency <= 4) {
+      return true;
+    }
+    if (typeof nav.deviceMemory === 'number' && nav.deviceMemory <= 4) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function savePerformanceMode(enabled: boolean): void {
+  safeSetItem('one_second_perf_mode', enabled ? 'true' : 'false');
 }
 
 // Run migration check on module load

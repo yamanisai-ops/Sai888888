@@ -33,7 +33,9 @@ interface StartScreenProps {
   hasUnclaimedStreak: boolean;
   currentStreak: number;
   isMuted: boolean;
+  performanceMode?: boolean;
   onToggleMute: () => void;
+  onTogglePerformanceMode?: () => void;
   onPlayClassic: () => void;
   onPlayGhost: () => void;
   onPlayEndless: () => void;
@@ -56,7 +58,9 @@ export const StartScreen: React.FC<StartScreenProps> = ({
   hasUnclaimedStreak,
   currentStreak,
   isMuted,
+  performanceMode = false,
   onToggleMute,
+  onTogglePerformanceMode,
   onPlayClassic,
   onPlayGhost,
   onPlayEndless,
@@ -113,6 +117,26 @@ export const StartScreen: React.FC<StartScreenProps> = ({
             <span className="w-1.5 h-1.5 rounded-full bg-orange-400 animate-ping" />
           )}
         </button>
+
+        {/* Performance Mode Toggle */}
+        {onTogglePerformanceMode && (
+          <button
+            type="button"
+            onClick={() => {
+              soundEngine.playClick();
+              onTogglePerformanceMode();
+            }}
+            aria-label={performanceMode ? 'Performance Mode Active' : 'Performance Mode Disabled'}
+            title={performanceMode ? 'Performance Mode: Active (Faster for low-end phones)' : 'Performance Mode: Off'}
+            className={`p-2.5 rounded-2xl border transition-all cursor-pointer ${
+              performanceMode
+                ? 'bg-amber-950/60 border-amber-500/60 text-amber-300 shadow-[0_0_10px_rgba(245,158,11,0.3)]'
+                : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Zap className={`w-4 h-4 ${performanceMode ? 'fill-amber-400 text-amber-400' : 'text-slate-400'}`} />
+          </button>
+        )}
 
         {/* Audio Mute Toggle */}
         <button
@@ -252,7 +276,7 @@ export const StartScreen: React.FC<StartScreenProps> = ({
       </div>
 
       {/* Main Home Menu Navigation Buttons */}
-      <div className="w-full max-w-md pb-1 flex flex-col gap-1.5 sm:gap-2">
+      <div className="w-full max-w-md pb-2 pb-safe flex flex-col gap-1.5 sm:gap-2">
         {/* PRIMARY BUTTON: PLAY */}
         <button
           type="button"

@@ -18,7 +18,8 @@ import {
   THEME_CYBER_MIDNIGHT,
 } from '../utils/environmentThemes';
 
-interface Particle {
+interface PooledParticle {
+  active: boolean;
   x: number;
   y: number;
   vx: number;
@@ -28,6 +29,16 @@ interface Particle {
   alpha: number;
   decay: number;
   isSparkle?: boolean;
+}
+
+// Low-overhead glow/shadow helper (Requirement 3 & 9: bypass CPU gaussian blur passes in perf mode & high speed)
+function setGlow(ctx: CanvasRenderingContext2D, color: string, blur: number, disableGlow?: boolean) {
+  if (disableGlow) {
+    ctx.shadowBlur = 0;
+  } else {
+    ctx.shadowColor = color;
+    ctx.shadowBlur = blur;
+  }
 }
 
 interface SpeedLine {
@@ -76,6 +87,10 @@ interface GameCanvasProps {
   ghostScore?: number;
   gameMode?: GameMode;
   survivalTimeSec?: number;
+  performanceMode?: boolean;
+  isGamePlaying?: boolean;
+  onGameTick?: (deltaSec: number) => void;
+  gameStateRef?: React.MutableRefObject<any>;
   onSwipeAction?: (action: Action) => void;
   onCollectRainCoin?: (id: string) => void;
   onCollectPowerUp?: (id: string) => void;
@@ -99,6 +114,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   ghostScore,
   gameMode = 'CLASSIC',
   survivalTimeSec = 0,
+  performanceMode = false,
+  isGamePlaying = false,
+  onGameTick,
+  gameStateRef,
   onSwipeAction,
   onCollectRainCoin,
   onCollectPowerUp,
@@ -108,13 +127,18 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   // References for persistent animation variables
   const animationFrameRef = useRef<number | null>(null);
   const roadOffsetRef = useRef<number>(0);
-  const particlesRef = useRef<Particle[]>([]);
+  const particlePoolRef = useRef<PooledParticle[]>([]);
   const speedLinesRef = useRef<SpeedLine[]>([]);
   const runnerLaneXRef = useRef<number>(0); // Smooth interpolated lane X
   const ghostLaneXRef = useRef<number>(0); // Smooth interpolated ghost lane X
   const prevObstacleIdRef = useRef<string | null>(null);
   const prevFeedbacksCountRef = useRef<number>(0);
   const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
+  const canvasSizeRef = useRef<{ width: number; height: number; dpr: number }>({
+    width: 400,
+    height: 600,
+    dpr: 1,
+  });
 
   // Dynamic Environment Theme References
   const currentThemeRef = useRef<EnvironmentTheme>(THEME_CYBER_MIDNIGHT);
@@ -200,19 +224,88 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       });
     }
     speedLinesRef.current = lines;
+
+    // Pre-allocate fixed Particle Pool (Requirement 4: zero object allocations during gameplay)
+    if (particlePoolRef.current.length === 0) {
+      particlePoolRef.current = Array.from({ length: 48 }, () => ({
+        active: false,
+        x: 0,
+        y: 0,
+        vx: 0,
+        vy: 0,
+        size: 0,
+        color: '#ffffff',
+        alpha: 0,
+        decay: 0.05,
+        isSparkle: false,
+      }));
+    }
   }, []);
 
-  // Spawn celebration particles on feedback changes (compact, lateral, non-obstructive)
+  // Spawn pooled particle helper
+  const spawnPooledParticle = (
+    x: number,
+    y: number,
+    vx: number,
+    vy: number,
+    size: number,
+    color: string,
+    alpha: number,
+    decay: number,
+    isSparkle?: boolean
+  ) => {
+    const pool = particlePoolRef.current;
+    if (pool.length === 0) return;
+    let slot = pool.find((p) => !p.active);
+    if (!slot) slot = pool[0];
+    slot.active = true;
+    slot.x = x;
+    slot.y = y;
+    slot.vx = vx;
+    slot.vy = vy;
+    slot.size = size;
+    slot.color = color;
+    slot.alpha = alpha;
+    slot.decay = decay;
+    slot.isSparkle = Boolean(isSparkle);
+  };
+
+  // Handle canvas sizing without forced synchronous layout on every frame
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const handleResize = () => {
+      const rect = canvas.getBoundingClientRect();
+      const maxDpr = performanceMode ? 1.0 : 2.0;
+      const dpr = Math.min(window.devicePixelRatio || 1, maxDpr);
+      const w = rect.width || 400;
+      const h = rect.height || 600;
+      canvasSizeRef.current = { width: w, height: h, dpr };
+      const dw = Math.floor(w * dpr);
+      const dh = Math.floor(h * dpr);
+      if (canvas.width !== dw || canvas.height !== dh) {
+        canvas.width = dw;
+        canvas.height = dh;
+      }
+    };
+
+    handleResize();
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [performanceMode]);
+
+  // Spawn celebration particles on feedback changes (pooled, compact, lateral, non-obstructive)
   useEffect(() => {
     if (floatingFeedbacks.length > prevFeedbacksCountRef.current) {
       const latest = floatingFeedbacks[floatingFeedbacks.length - 1];
-      const canvas = canvasRef.current;
-      const width = canvas ? canvas.width / (window.devicePixelRatio || 1) : 400;
-      const height = canvas ? canvas.height / (window.devicePixelRatio || 1) : 600;
+      const { width, height } = canvasSizeRef.current;
 
       if (latest.type === 'PERFECT' || latest.type === 'NEARMISS' || latest.type === 'BOSS') {
-        // Kept lightweight & non-obstructive for smooth Android performance
-        const pCount = latest.type === 'BOSS' ? 18 : latest.type === 'PERFECT' ? 12 : 8;
+        const speedScale = Math.max(0.4, 1.0 - (speedMultiplier - 1.0) * 0.5);
+        const baseCount = latest.type === 'BOSS' ? 14 : latest.type === 'PERFECT' ? 10 : 6;
+        const pCount = Math.max(2, Math.round((performanceMode ? baseCount * 0.5 : baseCount) * speedScale));
+
         const colorPalette =
           latest.type === 'BOSS'
             ? ['#f59e0b', '#ec4899', '#38bdf8']
@@ -222,25 +315,73 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
         for (let i = 0; i < pCount; i++) {
           const angle = Math.random() * Math.PI * 2;
-          const spd = 2.5 + Math.random() * 6;
-          // Spawn to the sides of the player, keeping the oncoming obstacle lane 100% clear
+          const spd = 2.5 + Math.random() * 5;
           const sideOffset = (Math.random() < 0.5 ? -1 : 1) * (25 + Math.random() * 35);
-          particlesRef.current.push({
-            x: width / 2 + sideOffset,
-            y: height * 0.72 + (Math.random() - 0.5) * 20,
-            vx: Math.cos(angle) * spd,
-            vy: Math.sin(angle) * spd,
-            size: 1.5 + Math.random() * 2.5,
-            color: colorPalette[Math.floor(Math.random() * colorPalette.length)],
-            alpha: 0.75,
-            decay: 0.04 + Math.random() * 0.03,
-            isSparkle: Math.random() < 0.5,
-          });
+          spawnPooledParticle(
+            width / 2 + sideOffset,
+            height * 0.72 + (Math.random() - 0.5) * 20,
+            Math.cos(angle) * spd,
+            Math.sin(angle) * spd,
+            1.5 + Math.random() * 2.5,
+            colorPalette[Math.floor(Math.random() * colorPalette.length)],
+            0.75,
+            0.04 + Math.random() * 0.03,
+            Math.random() < 0.5
+          );
         }
       }
     }
     prevFeedbacksCountRef.current = floatingFeedbacks.length;
-  }, [floatingFeedbacks]);
+  }, [floatingFeedbacks, performanceMode, speedMultiplier]);
+
+  // Synchronize latest props in ref for continuous 60fps render loop without re-triggering useEffect
+  const propsRef = useRef({
+    currentObstacle,
+    player,
+    feverActive,
+    isHurtShake,
+    floatingFeedbacks,
+    score,
+    combo,
+    speedMultiplier,
+    activeEvent,
+    activePowerUps,
+    activePowerUpPickup,
+    rainCoins,
+    isRushMode,
+    ghostPlayer,
+    ghostScore,
+    gameMode,
+    survivalTimeSec,
+    performanceMode,
+    isGamePlaying,
+    onGameTick,
+    gameStateRef,
+  });
+
+  propsRef.current = {
+    currentObstacle,
+    player,
+    feverActive,
+    isHurtShake,
+    floatingFeedbacks,
+    score,
+    combo,
+    speedMultiplier,
+    activeEvent,
+    activePowerUps,
+    activePowerUpPickup,
+    rainCoins,
+    isRushMode,
+    ghostPlayer,
+    ghostScore,
+    gameMode,
+    survivalTimeSec,
+    performanceMode,
+    isGamePlaying,
+    onGameTick,
+    gameStateRef,
+  };
 
   // Main Render Loop
   useEffect(() => {
@@ -255,26 +396,43 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       const delta = Math.min((time - lastTime) / 1000, 0.1);
       lastTime = time;
 
-      // Handle device pixel ratio for crystal clear rendering
-      const dpr = window.devicePixelRatio || 1;
-      const rect = canvas.getBoundingClientRect();
-      const displayWidth = Math.floor(rect.width * dpr);
-      const displayHeight = Math.floor(rect.height * dpr);
-
-      if (canvas.width !== displayWidth || canvas.height !== displayHeight) {
-        canvas.width = displayWidth;
-        canvas.height = displayHeight;
+      // Single Unified Game Engine Loop (Requirement 1 & 5: eliminates duplicate requestAnimationFrame)
+      if (propsRef.current.isGamePlaying && propsRef.current.onGameTick) {
+        propsRef.current.onGameTick(delta);
       }
+
+      // Read current live state from gameStateRef if available, else propsRef
+      const state = propsRef.current.gameStateRef?.current || propsRef.current;
+      const {
+        currentObstacle,
+        player,
+        feverActive,
+        isHurtShake,
+        floatingFeedbacks,
+        score,
+        speedMultiplier,
+        activeEvent,
+        activePowerUps,
+        activePowerUpPickup,
+        rainCoins,
+        isRushMode,
+        ghostPlayer,
+        ghostScore,
+        gameMode,
+        survivalTimeSec,
+      } = state;
+
+      const { width, height, dpr } = canvasSizeRef.current;
+      const disableGlow = performanceMode || speedMultiplier > 1.35;
 
       ctx.save();
       ctx.scale(dpr, dpr);
-      const width = rect.width;
-      const height = rect.height;
 
-      // Screen shake translation on mistakes
+      // Screen shake translation on mistakes (reduced in performance mode and high speed)
       if (isHurtShake) {
-        const shakeX = (Math.random() - 0.5) * 14;
-        const shakeY = (Math.random() - 0.5) * 14;
+        const shakeIntensity = performanceMode || speedMultiplier > 1.3 ? 6 : 14;
+        const shakeX = (Math.random() - 0.5) * shakeIntensity;
+        const shakeY = (Math.random() - 0.5) * shakeIntensity;
         ctx.translate(shakeX, shakeY);
       }
 
@@ -357,7 +515,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       // --- 3. PARALLAX TWINKLING STARS ---
       ctx.save();
       const starBaseColor = feverActive || isRushMode ? '#fde047' : nextT.starColor;
-      starsSeedRef.current.forEach((s) => {
+      const starCount = performanceMode ? 14 : starsSeedRef.current.length;
+      for (let i = 0; i < starCount; i++) {
+        const s = starsSeedRef.current[i];
         const sx = ((s.xR * width + runnerLaneXRef.current * 0.05) % width + width) % width;
         const sy = s.yR * (horizonY - 8);
         const twinkle = Math.sin(time * 0.003 + s.phase) * 0.35;
@@ -365,11 +525,11 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         ctx.fillStyle = starBaseColor;
         ctx.globalAlpha = alpha;
         ctx.fillRect(sx, sy, s.size, s.size);
-      });
+      }
       ctx.restore();
 
       // --- 4. DYNAMIC CELESTIAL PHENOMENON (Synth Sun, Digital Moon, Aurora, Ringed Planet, Solar Corona) ---
-      renderCelestialWonder(ctx, width, horizonY, nextT.celestialType, nextT.accentColor, curSkyHorizon, time);
+      renderCelestialWonder(ctx, width, horizonY, nextT.celestialType, nextT.accentColor, curSkyHorizon, time, disableGlow);
 
       // --- 5. DISTANT HORIZON SILHOUETTES (2.5D PARALLAX DEPTH) ---
       renderDistantSilhouette(
@@ -409,8 +569,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       // Horizon line
       ctx.strokeStyle = isRushMode ? '#f43f5e' : feverActive ? '#ec4899' : activeEvent ? activeEvent.color : curHorizonLine;
       ctx.lineWidth = 2;
-      ctx.shadowColor = ctx.strokeStyle as string;
-      ctx.shadowBlur = 6;
+      setGlow(ctx, ctx.strokeStyle as string, 6, disableGlow);
       ctx.beginPath();
       ctx.moveTo(0, horizonY);
       ctx.lineTo(width, horizonY);
@@ -524,10 +683,11 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         trackTopWidth,
         trackBottomWidth,
         shoulderOffsetRef.current,
-        isRushMode ? '#f43f5e' : feverActive ? '#ec4899' : curShoulderLight
+        isRushMode ? '#f43f5e' : feverActive ? '#ec4899' : curShoulderLight,
+        disableGlow
       );
 
-      // --- 4. SPEED LINES (WARP EFFECT - subtle, non-obstructive) ---
+      // --- 4. SPEED LINES (WARP EFFECT - delta-time scaled, reduced in perf mode) ---
       ctx.strokeStyle = isRushMode
         ? 'rgba(244, 63, 94, 0.32)'
         : feverActive
@@ -536,8 +696,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         ? 'rgba(249, 115, 22, 0.30)'
         : 'rgba(148, 163, 184, 0.16)';
       ctx.lineWidth = 1;
-      speedLinesRef.current.forEach((line) => {
-        line.y += line.speed * (effectiveSpeed * 0.9);
+      const linesCount = performanceMode ? 12 : speedLinesRef.current.length;
+      for (let i = 0; i < linesCount; i++) {
+        const line = speedLinesRef.current[i];
+        line.y += line.speed * (effectiveSpeed * 0.9) * (delta * 60);
         if (line.y > height) {
           line.y = horizonY - 10;
           line.x = Math.random() * width;
@@ -548,20 +710,21 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         ctx.moveTo(line.x, line.y);
         ctx.lineTo(line.x + Math.cos(angle) * line.length, line.y + Math.sin(angle) * line.length);
         ctx.stroke();
-      });
+      }
 
-      // --- 4B. SUBTLE FEVER PARTICLES (GENTLE AMBIENCE, NEVER OBSTRUCTS GAMEPLAY) ---
-      if ((feverActive || isRushMode) && Math.random() < 0.25) {
-        particlesRef.current.push({
-          x: width * 0.15 + Math.random() * width * 0.7,
-          y: height * 0.78,
-          vx: (Math.random() - 0.5) * 1.2,
-          vy: -1.5 - Math.random() * 2, // Float upwards gently
-          size: 1.5 + Math.random() * 2,
-          color: isRushMode ? '#f43f5e' : Math.random() < 0.5 ? '#f59e0b' : '#ec4899',
-          alpha: 0.35,
-          decay: 0.025,
-        });
+      // --- 4B. SUBTLE FEVER PARTICLES (GENTLE AMBIENCE, POOLED) ---
+      const feverSpawnChance = performanceMode ? 0.08 : speedMultiplier > 1.35 ? 0.12 : 0.22;
+      if ((feverActive || isRushMode) && Math.random() < feverSpawnChance) {
+        spawnPooledParticle(
+          width * 0.15 + Math.random() * width * 0.7,
+          height * 0.78,
+          (Math.random() - 0.5) * 1.2,
+          -1.5 - Math.random() * 2,
+          1.5 + Math.random() * 2,
+          isRushMode ? '#f43f5e' : Math.random() < 0.5 ? '#f59e0b' : '#ec4899',
+          0.35,
+          0.025
+        );
       }
 
       // --- 5. RENDER APPROACHING POWER-UP PICKUP IF PRESENT ---
@@ -575,7 +738,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         const laneW = roadWAtY / 3;
         const pwrX = width / 2 + activePowerUpPickup.lane * laneW;
 
-        renderPowerUpPickup(ctx, pwrX, pwrY, pwrScale, activePowerUpPickup.type, time);
+        renderPowerUpPickup(ctx, pwrX, pwrY, pwrScale, activePowerUpPickup.type, time, disableGlow);
       }
 
       // --- 6. RENDER OBSTACLE ---
@@ -609,10 +772,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           }
         }
 
-        renderObstacleGraphics(ctx, currentObstacle, feverActive || isRushMode);
+        renderObstacleGraphics(ctx, currentObstacle, feverActive || isRushMode, disableGlow);
 
         const remainingRatio = Math.max(0, currentObstacle.remainingTime / currentObstacle.timeLimit);
-        renderReactionTimerHUD(ctx, remainingRatio, currentObstacle);
+        renderReactionTimerHUD(ctx, remainingRatio, currentObstacle, disableGlow);
 
         ctx.restore();
       }
@@ -624,7 +787,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       const runnerBaseY = height * 0.74;
       const runnerBaseX = width / 2 + runnerLaneXRef.current;
 
-      renderRunnerCharacter(ctx, runnerBaseX, runnerBaseY, player, feverActive || isRushMode, delta, activePowerUps);
+      renderRunnerCharacter(ctx, runnerBaseX, runnerBaseY, player, feverActive || isRushMode, delta, activePowerUps, false, disableGlow);
 
       // --- 7B. RENDER GHOST RUNNER IF ACTIVE (Requirement 7: Ethereal glow, distinctive, 👻 GHOST label) ---
       if (ghostPlayer) {
@@ -641,8 +804,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         ctx.fillStyle = 'rgba(26, 16, 49, 0.85)';
         ctx.strokeStyle = '#c084fc';
         ctx.lineWidth = 1.2;
-        ctx.shadowColor = '#c084fc';
-        ctx.shadowBlur = 10;
+        setGlow(ctx, '#c084fc', 10, disableGlow);
         ctx.beginPath();
         const labelW = typeof ghostScore === 'number' ? 78 : 64;
         ctx.roundRect(ghostBaseX - labelW / 2, ghostBaseY - 88, labelW, 18, 5);
@@ -659,9 +821,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         // Render Ghost Runner with semi-transparency and spectral glowing aura
         ctx.save();
         ctx.globalAlpha = 0.52;
-        ctx.shadowColor = '#a855f7';
-        ctx.shadowBlur = 14;
-        renderRunnerCharacter(ctx, ghostBaseX, ghostBaseY, ghostPlayer, false, delta, undefined, true);
+        setGlow(ctx, '#a855f7', 14, disableGlow);
+        renderRunnerCharacter(ctx, ghostBaseX, ghostBaseY, ghostPlayer, false, delta, undefined, true, disableGlow);
         ctx.restore();
       }
 
@@ -674,8 +835,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
           ctx.save();
           ctx.translate(px, py);
-          ctx.shadowColor = '#f59e0b';
-          ctx.shadowBlur = 10;
+          setGlow(ctx, '#f59e0b', 8, disableGlow);
           ctx.fillStyle = '#fbbf24';
           ctx.beginPath();
           ctx.ellipse(0, 0, rc.size, rc.size * (0.6 + Math.sin(time * 0.008 + rc.speed) * 0.4), 0, 0, Math.PI * 2);
@@ -691,30 +851,29 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         });
       }
 
-      // --- 9. PARTICLES UPDATE & DRAW ---
-      for (let i = particlesRef.current.length - 1; i >= 0; i--) {
-        const p = particlesRef.current[i];
-        p.x += p.vx;
-        p.y += p.vy;
-        p.alpha -= p.decay;
-        p.size *= 0.96;
+      // --- 9. PARTICLES UPDATE & DRAW (Object pooled, zero GC allocations) ---
+      const deltaFactor = delta * 60;
+      const pool = particlePoolRef.current;
+      for (let i = 0; i < pool.length; i++) {
+        const p = pool[i];
+        if (!p.active) continue;
+        p.x += p.vx * deltaFactor;
+        p.y += p.vy * deltaFactor;
+        p.alpha -= p.decay * deltaFactor;
+        p.size *= Math.pow(0.96, deltaFactor);
 
         if (p.alpha <= 0 || p.size < 0.5) {
-          particlesRef.current.splice(i, 1);
+          p.active = false;
           continue;
         }
 
         ctx.fillStyle = p.color;
         ctx.globalAlpha = p.alpha;
         ctx.beginPath();
-        if (p.isSparkle) {
-          ctx.arc(p.x, p.y, p.size * 1.2, 0, Math.PI * 2);
-        } else {
-          ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-        }
+        ctx.arc(p.x, p.y, p.isSparkle ? p.size * 1.2 : p.size, 0, Math.PI * 2);
         ctx.fill();
-        ctx.globalAlpha = 1.0;
       }
+      ctx.globalAlpha = 1.0;
 
       // --- 10. FLOATING TEXT FEEDBACK & COMPACT NOTIFICATIONS (Requirement 1 & 3) ---
       // Positioned high in the sky zone (height * 0.09) to NEVER hide the player, obstacle, or action requirement
@@ -804,30 +963,20 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
     animationFrameRef.current = requestAnimationFrame(render);
 
+    const handleVisibility = () => {
+      if (!document.hidden) {
+        lastTime = performance.now();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
     return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
       if (animationFrameRef.current !== null) {
         cancelAnimationFrame(animationFrameRef.current);
       }
     };
-  }, [
-    currentObstacle,
-    player,
-    feverActive,
-    isHurtShake,
-    floatingFeedbacks,
-    score,
-    combo,
-    speedMultiplier,
-    activeEvent,
-    activePowerUps,
-    activePowerUpPickup,
-    rainCoins,
-    isRushMode,
-    ghostPlayer,
-    ghostScore,
-    gameMode,
-    survivalTimeSec,
-  ]);
+  }, []);
 
   // Touch & Click Handlers (Swipe, Coin Rain click, Power-up click)
   const handleTouchStart = (e: React.TouchEvent) => {
@@ -877,10 +1026,11 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     const rect = canvas.getBoundingClientRect();
     const tapX = clientX - rect.left;
     const tapY = clientY - rect.top;
+    const { rainCoins: liveCoins, activePowerUpPickup: livePowerUp } = propsRef.current;
 
     // Check Rain Coins
-    if (rainCoins && onCollectRainCoin) {
-      for (const coin of rainCoins) {
+    if (liveCoins && onCollectRainCoin) {
+      for (const coin of liveCoins) {
         if (!coin.collected) {
           const coinX = coin.x * rect.width;
           const coinY = coin.y * rect.height;
@@ -893,18 +1043,18 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     }
 
     // Check Approaching Power-Up Pickup
-    if (activePowerUpPickup && !activePowerUpPickup.collected && onCollectPowerUp) {
+    if (livePowerUp && !livePowerUp.collected && onCollectPowerUp) {
       const trackTopW = rect.width * 0.22;
       const trackBotW = rect.width * 0.92;
       const horY = rect.height * 0.35;
-      const d = Math.max(0, Math.min(1, activePowerUpPickup.distance));
+      const d = Math.max(0, Math.min(1, livePowerUp.distance));
       const t = 1.0 - d;
       const py = horY + Math.pow(t, 1.8) * (rect.height * 0.74 - horY);
       const rw = trackTopW + Math.pow(t, 1.8) * (trackBotW - trackTopW);
-      const px = rect.width / 2 + activePowerUpPickup.lane * (rw / 3);
+      const px = rect.width / 2 + livePowerUp.lane * (rw / 3);
 
       if (Math.hypot(tapX - px, tapY - py) < 65) {
-        onCollectPowerUp(activePowerUpPickup.id);
+        onCollectPowerUp(livePowerUp.id);
       }
     }
   };
@@ -932,7 +1082,8 @@ function renderPowerUpPickup(
   y: number,
   scale: number,
   type: string,
-  time: number
+  time: number,
+  disableGlow?: boolean
 ) {
   ctx.save();
   ctx.translate(x, y + Math.sin(time * 0.006) * 6);
@@ -950,8 +1101,7 @@ function renderPowerUpPickup(
       : '#eab308';
 
   // Radiant outer aura
-  ctx.shadowColor = color;
-  ctx.shadowBlur = 20;
+  setGlow(ctx, color, 20, disableGlow);
   ctx.fillStyle = `${color}44`;
   ctx.beginPath();
   ctx.arc(0, 0, 28, 0, Math.PI * 2);
@@ -987,7 +1137,7 @@ function renderPowerUpPickup(
 }
 
 // Helper: Render Obstacle Graphics with V4 Patterns & Boss Mode
-function renderObstacleGraphics(ctx: CanvasRenderingContext2D, obs: Obstacle, isBoosted: boolean) {
+function renderObstacleGraphics(ctx: CanvasRenderingContext2D, obs: Obstacle, isBoosted: boolean, disableGlow?: boolean) {
   // BOSS OBSTACLE
   if (obs.isBoss && obs.bossSteps) {
     const currentStepAction = obs.bossSteps[obs.bossCurrentStepIndex || 0] || obs.action;
@@ -998,8 +1148,7 @@ function renderObstacleGraphics(ctx: CanvasRenderingContext2D, obs: Obstacle, is
     ctx.translate(0, -30);
 
     // Boss Shadow
-    ctx.shadowColor = '#ef4444';
-    ctx.shadowBlur = 30;
+    setGlow(ctx, '#ef4444', 30, disableGlow);
 
     // Boss Cyber Chassis
     ctx.fillStyle = '#09090b';
@@ -1024,8 +1173,7 @@ function renderObstacleGraphics(ctx: CanvasRenderingContext2D, obs: Obstacle, is
 
     // Menacing glowing core
     ctx.fillStyle = '#ef4444';
-    ctx.shadowColor = '#ef4444';
-    ctx.shadowBlur = 25;
+    setGlow(ctx, '#ef4444', 25, disableGlow);
     ctx.beginPath();
     ctx.arc(0, 0, 22, 0, Math.PI * 2);
     ctx.fill();
@@ -1037,7 +1185,8 @@ function renderObstacleGraphics(ctx: CanvasRenderingContext2D, obs: Obstacle, is
     ctx.fill();
 
     // Boss Title
-    ctx.shadowBlur = 10;
+    if (disableGlow) ctx.shadowBlur = 0;
+    else ctx.shadowBlur = 10;
     ctx.fillStyle = '#ffffff';
     ctx.font = '900 13px "Chakra Petch", sans-serif';
     ctx.textAlign = 'center';
@@ -1062,8 +1211,7 @@ function renderObstacleGraphics(ctx: CanvasRenderingContext2D, obs: Obstacle, is
     ctx.translate(0, -25);
 
     // Mini Boss Shadow
-    ctx.shadowColor = '#f97316';
-    ctx.shadowBlur = 24;
+    setGlow(ctx, '#f97316', 24, disableGlow);
 
     // Mini Boss Chassis
     ctx.fillStyle = '#0f172a';
@@ -1087,7 +1235,8 @@ function renderObstacleGraphics(ctx: CanvasRenderingContext2D, obs: Obstacle, is
     }
 
     // Mini Boss Title
-    ctx.shadowBlur = 10;
+    if (disableGlow) ctx.shadowBlur = 0;
+    else ctx.shadowBlur = 10;
     ctx.fillStyle = '#fbbf24';
     ctx.font = '900 12px "Chakra Petch", sans-serif';
     ctx.textAlign = 'center';
@@ -1101,8 +1250,7 @@ function renderObstacleGraphics(ctx: CanvasRenderingContext2D, obs: Obstacle, is
     // Current Action Required
     ctx.fillStyle = '#f97316';
     ctx.font = '900 22px "Chakra Petch", sans-serif';
-    ctx.shadowColor = '#f97316';
-    ctx.shadowBlur = 14;
+    setGlow(ctx, '#f97316', 14, disableGlow);
     ctx.fillText(`NEXT: ${currentStepAction}`, 0, 26);
 
     ctx.restore();
@@ -1140,8 +1288,7 @@ function renderObstacleGraphics(ctx: CanvasRenderingContext2D, obs: Obstacle, is
     const w = 155;
     const h = 48;
 
-    ctx.shadowColor = '#f59e0b';
-    ctx.shadowBlur = 12;
+    setGlow(ctx, '#f59e0b', 12, disableGlow);
     ctx.fillStyle = 'rgba(245, 158, 11, 0.95)';
     ctx.beginPath();
     ctx.roundRect(-w / 2, -h / 2, w, h, 6);
@@ -1167,8 +1314,7 @@ function renderObstacleGraphics(ctx: CanvasRenderingContext2D, obs: Obstacle, is
     ctx.fill();
     ctx.stroke();
 
-    ctx.shadowColor = '#f59e0b';
-    ctx.shadowBlur = 6;
+    setGlow(ctx, '#f59e0b', 6, disableGlow);
     ctx.fillStyle = '#fef08a';
     ctx.font = '900 16px "Chakra Petch", sans-serif';
     ctx.textAlign = 'center';
@@ -1181,8 +1327,7 @@ function renderObstacleGraphics(ctx: CanvasRenderingContext2D, obs: Obstacle, is
 
     ctx.save();
     ctx.translate(0, -60);
-    ctx.shadowColor = '#06b6d4';
-    ctx.shadowBlur = 14;
+    setGlow(ctx, '#06b6d4', 14, disableGlow);
     ctx.fillStyle = 'rgba(6, 182, 212, 0.95)';
     ctx.beginPath();
     ctx.roundRect(-w / 2, -h / 2, w, h, 8);
@@ -1212,8 +1357,7 @@ function renderObstacleGraphics(ctx: CanvasRenderingContext2D, obs: Obstacle, is
     const w = 165;
     const h = 80;
 
-    ctx.shadowColor = '#a855f7';
-    ctx.shadowBlur = 14;
+    setGlow(ctx, '#a855f7', 14, disableGlow);
     ctx.fillStyle = 'rgba(147, 51, 234, 0.95)';
     ctx.beginPath();
     ctx.roundRect(-w / 2, -h / 2, w, h, 8);
@@ -1239,8 +1383,7 @@ function renderObstacleGraphics(ctx: CanvasRenderingContext2D, obs: Obstacle, is
     const w = 165;
     const h = 80;
 
-    ctx.shadowColor = '#f97316';
-    ctx.shadowBlur = 14;
+    setGlow(ctx, '#f97316', 14, disableGlow);
     ctx.fillStyle = 'rgba(234, 88, 12, 0.95)';
     ctx.beginPath();
     ctx.roundRect(-w / 2, -h / 2, w, h, 8);
@@ -1279,7 +1422,7 @@ function renderObstacleGraphics(ctx: CanvasRenderingContext2D, obs: Obstacle, is
 }
 
 // Helper: Render Reaction Timer HUD
-function renderReactionTimerHUD(ctx: CanvasRenderingContext2D, ratio: number, obs: Obstacle) {
+function renderReactionTimerHUD(ctx: CanvasRenderingContext2D, ratio: number, obs: Obstacle, disableGlow?: boolean) {
   ctx.save();
   ctx.translate(0, -78);
 
@@ -1293,8 +1436,7 @@ function renderReactionTimerHUD(ctx: CanvasRenderingContext2D, ratio: number, ob
   ctx.stroke();
 
   ctx.strokeStyle = timerColor;
-  ctx.shadowColor = timerColor;
-  ctx.shadowBlur = 8;
+  setGlow(ctx, timerColor, 8, disableGlow);
   ctx.beginPath();
   ctx.arc(0, 0, radius, -Math.PI / 2, -Math.PI / 2 + ratio * Math.PI * 2);
   ctx.stroke();
@@ -1316,7 +1458,8 @@ function renderRunnerCharacter(
   isFever: boolean,
   delta: number,
   activePowerUps?: ActivePowerUpState,
-  isGhost?: boolean
+  isGhost?: boolean,
+  disableGlow?: boolean
 ) {
   ctx.save();
   ctx.translate(x, y);
@@ -1352,8 +1495,7 @@ function renderRunnerCharacter(
 
   // 2. Fever Aura / After-images
   if (isFever) {
-    ctx.shadowColor = '#f59e0b';
-    ctx.shadowBlur = 25;
+    setGlow(ctx, '#f59e0b', 25, disableGlow);
     ctx.strokeStyle = 'rgba(251, 191, 36, 0.7)';
     ctx.lineWidth = 3;
     ctx.beginPath();
@@ -1365,8 +1507,7 @@ function renderRunnerCharacter(
   // A. Shield Forcefield Bubble
   if (activePowerUps?.hasShield) {
     ctx.save();
-    ctx.shadowColor = '#06b6d4';
-    ctx.shadowBlur = 18;
+    setGlow(ctx, '#06b6d4', 18, disableGlow);
     ctx.strokeStyle = 'rgba(6, 182, 212, 0.85)';
     ctx.fillStyle = 'rgba(6, 182, 212, 0.16)';
     ctx.lineWidth = 2.5;
@@ -1442,8 +1583,7 @@ function renderRunnerCharacter(
     ctx.fillStyle = '#64748b';
     ctx.fillRect(-2, -66, 4, 9);
     ctx.fillStyle = '#10b981';
-    ctx.shadowColor = '#10b981';
-    ctx.shadowBlur = 8;
+    setGlow(ctx, '#10b981', 8, disableGlow);
     ctx.beginPath();
     ctx.arc(0, -68, 3, 0, Math.PI * 2);
     ctx.fill();
@@ -1477,8 +1617,7 @@ function renderRunnerCharacter(
     : player.currentAction === 'HURT'
     ? '#ef4444'
     : skin.visorColor;
-  ctx.shadowColor = isGhost ? '#38bdf8' : ctx.fillStyle;
-  ctx.shadowBlur = isGhost ? 14 : 10;
+  setGlow(ctx, isGhost ? '#38bdf8' : ctx.fillStyle, isGhost ? 14 : 10, disableGlow);
   ctx.beginPath();
   ctx.roundRect(-13, -50, 26, 10, 4);
   ctx.fill();
@@ -1514,15 +1653,15 @@ function renderCelestialWonder(
   celestialType: string,
   accentColor: string,
   skyHorizonColor: string,
-  time: number
+  time: number,
+  disableGlow?: boolean
 ) {
   if (celestialType === 'DIGITAL_MOON') {
     const moonX = width * 0.74;
     const moonY = horizonY * 0.44;
     ctx.save();
     ctx.translate(moonX, moonY);
-    ctx.shadowColor = accentColor;
-    ctx.shadowBlur = 18;
+    setGlow(ctx, accentColor, 18, disableGlow);
     ctx.fillStyle = '#e0f2fe';
     ctx.beginPath();
     ctx.arc(0, 0, 18, -Math.PI * 0.6, Math.PI * 0.6, false);
@@ -1544,8 +1683,7 @@ function renderCelestialWonder(
     const sunY = horizonY - 4;
     const sunR = Math.min(68, width * 0.17);
     ctx.save();
-    ctx.shadowColor = '#f43f5e';
-    ctx.shadowBlur = 24;
+    setGlow(ctx, '#f43f5e', 24, disableGlow);
     const grad = ctx.createLinearGradient(0, sunY - sunR, 0, sunY + sunR);
     grad.addColorStop(0, '#fef08a');
     grad.addColorStop(0.3, '#facc15');
@@ -1614,8 +1752,7 @@ function renderCelestialWonder(
     pGrad.addColorStop(0.45, '#818cf8');
     pGrad.addColorStop(1, '#1e1b4b');
     ctx.fillStyle = pGrad;
-    ctx.shadowColor = '#c084fc';
-    ctx.shadowBlur = 15;
+    setGlow(ctx, '#c084fc', 15, disableGlow);
     ctx.beginPath();
     ctx.arc(0, 0, pR, 0, Math.PI * 2);
     ctx.fill();
@@ -1651,8 +1788,7 @@ function renderCelestialWonder(
       ctx.lineTo(sX + Math.cos(rayAngle) * rayLen, sY - Math.sin(rayAngle) * rayLen);
       ctx.stroke();
     }
-    ctx.shadowColor = '#facc15';
-    ctx.shadowBlur = 30;
+    setGlow(ctx, '#facc15', 30, disableGlow);
     const cGrad = ctx.createRadialGradient(sX, sY, 4, sX, sY, sR);
     cGrad.addColorStop(0, '#ffffff');
     cGrad.addColorStop(0.3, '#fef08a');
@@ -1668,8 +1804,7 @@ function renderCelestialWonder(
     const eY = horizonY - 12;
     const eR = 36;
     ctx.save();
-    ctx.shadowColor = '#c084fc';
-    ctx.shadowBlur = 28;
+    setGlow(ctx, '#c084fc', 28, disableGlow);
     const gGrad = ctx.createRadialGradient(eX, eY, eR * 0.8, eX, eY, eR * 1.9);
     gGrad.addColorStop(0, 'rgba(216, 180, 254, 0.9)');
     gGrad.addColorStop(0.4, 'rgba(168, 85, 247, 0.4)');
@@ -1693,8 +1828,7 @@ function renderCelestialWonder(
     const cY = horizonY - 14;
     const cR = 22;
     ctx.save();
-    ctx.shadowColor = '#38bdf8';
-    ctx.shadowBlur = 22;
+    setGlow(ctx, '#38bdf8', 22, disableGlow);
     ctx.strokeStyle = 'rgba(56, 189, 248, 0.75)';
     ctx.lineWidth = 4;
     ctx.beginPath();
@@ -1899,7 +2033,8 @@ function renderShoulderSpeedPillars(
   trackTopWidth: number,
   trackBottomWidth: number,
   offset: number,
-  shoulderColor: string
+  shoulderColor: string,
+  disableGlow?: boolean
 ) {
   ctx.save();
   const numPillars = 8;
@@ -1915,8 +2050,12 @@ function renderShoulderSpeedPillars(
     const pillarWidth = Math.max(1.5, Math.pow(t, 2.2) * 4);
 
     ctx.fillStyle = shoulderColor;
-    ctx.shadowColor = shoulderColor;
-    ctx.shadowBlur = Math.min(10, Math.pow(t, 2.2) * 12);
+    if (!disableGlow) {
+      ctx.shadowColor = shoulderColor;
+      ctx.shadowBlur = Math.min(10, Math.pow(t, 2.2) * 12);
+    } else {
+      ctx.shadowBlur = 0;
+    }
 
     ctx.fillRect(lx - pillarWidth, py - pillarHeight, pillarWidth, pillarHeight);
     ctx.fillRect(rx, py - pillarHeight, pillarWidth, pillarHeight);

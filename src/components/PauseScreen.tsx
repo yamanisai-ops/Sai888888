@@ -1,5 +1,5 @@
 import React from 'react';
-import { Play, RotateCcw, Home, Volume2, VolumeX } from 'lucide-react';
+import { Play, RotateCcw, Home, Volume2, VolumeX, Zap } from 'lucide-react';
 import { soundEngine } from '../audio/soundEngine';
 
 interface PauseScreenProps {
@@ -7,10 +7,12 @@ interface PauseScreenProps {
   combo: number;
   lives: number;
   isMuted: boolean;
+  performanceMode?: boolean;
   onResume: () => void;
   onRestart: () => void;
   onHome: () => void;
   onToggleMute: () => void;
+  onTogglePerformanceMode?: () => void;
 }
 
 export const PauseScreen: React.FC<PauseScreenProps> = ({
@@ -18,10 +20,12 @@ export const PauseScreen: React.FC<PauseScreenProps> = ({
   combo,
   lives,
   isMuted,
+  performanceMode = false,
   onResume,
   onRestart,
   onHome,
   onToggleMute,
+  onTogglePerformanceMode,
 }) => {
   return (
     <div className="absolute inset-0 z-40 flex flex-col items-center justify-center p-6 bg-slate-950/90 backdrop-blur-md text-white select-none">
@@ -97,6 +101,20 @@ export const PauseScreen: React.FC<PauseScreenProps> = ({
             {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4 text-cyan-400" />}
             <span>{isMuted ? 'Sound: OFF (Click to Unmute)' : 'Sound: ON (Click to Mute)'}</span>
           </button>
+
+          {onTogglePerformanceMode && (
+            <button
+              type="button"
+              onClick={() => {
+                soundEngine.playClick();
+                onTogglePerformanceMode();
+              }}
+              className="w-full py-2 text-xs text-slate-400 hover:text-slate-200 flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+            >
+              <Zap className={`w-4 h-4 ${performanceMode ? 'text-amber-400 fill-amber-400' : 'text-slate-500'}`} />
+              <span>{performanceMode ? 'Performance Mode: ON (Fast)' : 'Performance Mode: OFF (Normal)'}</span>
+            </button>
+          )}
         </div>
       </div>
     </div>

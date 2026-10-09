@@ -57,6 +57,7 @@ import {
   getEquippedSkin,
   getGhostRun,
   getMissions,
+  getPerformanceMode,
   getPurchasedSkins,
   getUserStats,
   purchaseSkin,
@@ -67,6 +68,7 @@ import {
   saveEndlessBestScore,
   saveEndlessBestSurvival,
   saveGhostRun,
+  savePerformanceMode,
   setEquippedSkin,
   updateDailyChallengeProgress,
   updateMissionsProgress,
@@ -231,9 +233,22 @@ export default function App() {
 
   // Falling Rain Coins for Coin Rain event
   const [rainCoins, setRainCoins] = useState<RainCoin[]>([]);
+  const rainCoinsRef = useRef<RainCoin[]>([]);
 
-  // Survival time tracking
+  // Survival time tracking (Requirement 2 & 6: Pause-safe accumulated run time)
   const runStartTimeRef = useRef<number>(0);
+  const activeRunTimeMsRef = useRef<number>(0);
+  const hudTickAccumulatorRef = useRef<number>(0);
+
+  // Performance Mode (Requirement 9: Budget Android devices auto-detection & toggle)
+  const [performanceMode, setPerformanceMode] = useState<boolean>(() => getPerformanceMode());
+  const handleTogglePerformanceMode = useCallback(() => {
+    setPerformanceMode((prev) => {
+      const next = !prev;
+      savePerformanceMode(next);
+      return next;
+    });
+  }, []);
 
   // Screen trauma / flash / shake
   const [isHurtShake, setIsHurtShake] = useState<boolean>(false);
@@ -377,6 +392,18 @@ export default function App() {
     setPlayer((prev) => ({ ...prev, skinId: equippedSkin }));
     stateRef.current.player.skinId = equippedSkin;
   }, [equippedSkin]);
+
+  // Auto-pause and stop sound when tab or browser window is hidden (e.g. mobile lock / app switch)
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.hidden && stateRef.current.gameState === 'PLAYING') {
+        soundEngine.stopBgm();
+        setGameState('PAUSED');
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, []);
 
   // Show Upgraded Reward Popup Helper (Requirement 6: Never covers player or obstacle)
   const triggerRewardPopup = useCallback((data: RewardToastData) => {
@@ -757,7 +784,7 @@ export default function App() {
             soundEngine.playMilestone();
             const cXp = addPlayerXp(25);
             setPlayerProgression(getPlayerProgression());
-            if (cXp.coinReward > 0) setCoins(getCoins());
+            setCoins(getCoins());
             if (cXp.leveledUp) {
               setLevelUpModalData({
                 level: cXp.newLevel,
@@ -1614,8 +1641,7 @@ export default function App() {
                   });
                 } catch {}
                 triggerRewardToast(`CHALLENGE COMPLETE: ${res.challengeTitle}!`, res.coinsAwarded);
-                const updated = addCoins(res.coinsAwarded);
-                setCoins(updated);
+                setCoins(getCoins());
               }
             }
           }
@@ -2168,6 +2194,13 @@ export default function App() {
               setCoins(updatedTotal);
               setCoinsEarnedThisRun(0);
               stateRef.current.coinsEarnedThisRun = 0;
+            }
+            if (stateRef.current.xpEarnedThisRun > 0) {
+              const res = addPlayerXp(stateRef.current.xpEarnedThisRun);
+              setPlayerProgression(getPlayerProgression());
+              if (res.coinReward > 0) setCoins(getCoins());
+              setXpEarnedThisRun(0);
+              stateRef.current.xpEarnedThisRun = 0;
             }
             handleStartPlay(gameMode);
           }}

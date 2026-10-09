@@ -804,6 +804,10 @@ class SoundEngine {
       this.bgmIntervalId = null;
     }
   }
+
+  public stopAll() {
+    this.stopBgm();
+  }
 }
 
 export const soundEngine = new SoundEngine();
